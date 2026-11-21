@@ -215,6 +215,9 @@ tbody tr:nth-child(even) {
 tbody tr.selected {
   background: #e1edff;
 }
+tbody tr.selected th {
+  box-shadow: inset 3px 0 #346be7;
+}
 .sort,
 .opportunity {
   border: 0;
@@ -240,10 +243,30 @@ small {
 .badge {
   border-radius: 999px;
   padding: 2px 8px;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.78rem;
   font-weight: 750;
   white-space: nowrap;
+}
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.pipeline-search {
+  flex-basis: 100%;
+}
+.pipeline-search input {
+  max-width: 380px;
+}
+.filtered-selection {
+  background: #edf4ff;
+}
+.filtered-selection button {
+  margin-top: 6px;
 }
 .green {
   color: #175740;
@@ -327,4 +350,121 @@ small {
     flex-wrap: wrap;
     gap: 4px;
   }
+}
+
+.next-actions {
+  border-bottom: 1px solid #e5ebf3;
+  padding: 14px 20px;
+}
+.next-actions > p,
+.action-card > p {
+  color: #50627c;
+  margin-top: 4px;
+}
+.next-actions ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: grid;
+  gap: 8px;
+}
+.action-card {
+  border: 1px solid #d9e2ee;
+  background: #f8fafd;
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+.action-card h4 {
+  margin: 0;
+}
+.action-card fieldset {
+  padding: 0;
+  border: 0;
+  margin: 8px 0 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.action-card label {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 135px;
+  min-width: 0;
+}
+.action-card input,
+.action-card select {
+  width: 100%;
+  min-width: 0;
+  background: white;
+  border: 1px solid #bdcce0;
+  border-radius: 6px;
+  padding: 6px;
+  min-height: 36px;
+}
+.action-card .primary {
+  cursor: pointer;
+  padding: 6px 9px;
+  min-height: 36px;
+}
+.action-card .action-unavailable {
+  color: #754919;
+  font-size: 0.9rem;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.toast {
+  position: fixed;
+  z-index: 10;
+  top: 80px;
+  right: 20px;
+  width: min(360px, calc(100vw - 40px));
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 12px 12px 15px;
+  border: 1px solid #c8dccf;
+  border-left: 4px solid #248359;
+  border-radius: 8px;
+  background: #fff;
+  color: #175740;
+  box-shadow: 0 8px 26px #18283f26;
+}
+.toast-error {
+  border-color: #e8c7c5;
+  border-left-color: #a22435;
+  color: #852636;
+}
+.toast-message {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.toast-context {
+  color: #536480;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+.toast-dismiss {
+  flex: 0 0 32px;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+.toast-dismiss:hover {
+  background: #edf2f8;
+}
+.field-validation {
+  color: #852636;
+  margin-top: 6px;
 }

@@ -1,6 +1,10 @@
-﻿import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  accountDisplayName,
   emptyFilters,
+  excludingFilters,
+  healthLabels,
+  pipelinePage,
   selectRows,
   type PipelineData,
   type Row,
@@ -8,7 +12,6 @@ import {
 } from "./pipeline";
 import type { Health } from "../server/health";
 
-const pageSize = 50;
 const amountFormat = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2
 });
@@ -26,7 +29,8 @@ export function HealthBadge({ health }: { health?: Health }) {
   return (
     <div>
       <span className={"badge " + (health?.status.toLowerCase() ?? "unknown")}>
-        {health?.status ?? "Unavailable"}
+        <span className="health-dot" aria-hidden="true" />
+        {healthLabels[health?.status ?? "Unavailable"]}
       </span>
       {health?.incomplete && <small>Incomplete data</small>}
     </div>
@@ -43,18 +47,28 @@ const columns: { key: SortKey; label: string }[] = [
 export function Pipeline({
   data,
   selected,
-  onSelect
+  onSelect,
+  follow,
+  onFollow,
+  onLeaveFollow,
+  preview
 }: {
   data: PipelineData;
   selected?: string;
   onSelect: (row: Row) => void;
+  follow?: { id: string };
+  onFollow: (id: string) => void;
+  onLeaveFollow: () => void;
+  preview?: { opportunityId: string; date: string };
 }) {
   const [filters, setFilters] = useState(emptyFilters);
   const [sort, setSort] = useState<{ key: SortKey; ascending: boolean }>({
     key: "CloseDate",
     ascending: true
   });
-  const [page, setPage] = useState(0);
+  const [requestedPage, setPage] = useState(0);
+  const tableRegion = useRef<HTMLDivElement>(null);
+  const selectedRow = useRef<HTMLTableRowElement>(null);
   const stages = useMemo(
     () =>
       [
@@ -66,12 +80,48 @@ export function Pipeline({
     () => selectRows(data.rows, filters, sort),
     [data.rows, filters, sort]
   );
-  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
-  const visible = rows.slice(page * pageSize, (page + 1) * pageSize);
+  const followId = follow?.id === selected ? follow?.id : undefined;
+  const { page, pages, visible, selectedIndex } = pipelinePage(
+    rows,
+    requestedPage,
+    followId
+  );
+  const filteredSelection =
+    followId && selectedIndex < 0
+      ? data.rows.find((row) => row.Id === followId)
+      : undefined;
+  const hiddenBy = filteredSelection
+    ? excludingFilters(filteredSelection, filters)
+    : [];
+  useEffect(() => {
+    const region = tableRegion.current;
+    const row = selectedRow.current;
+    if (
+      !follow ||
+      follow.id !== selected ||
+      selectedIndex < 0 ||
+      !region ||
+      !row
+    )
+      return;
+    const bounds = region.getBoundingClientRect();
+    const rowBounds = row.getBoundingClientRect();
+    const headerHeight =
+      region.querySelector("thead")?.getBoundingClientRect().height ?? 0;
+    if (rowBounds.top < bounds.top + headerHeight)
+      region.scrollTop += rowBounds.top - bounds.top - headerHeight;
+    else if (rowBounds.bottom > bounds.bottom)
+      region.scrollTop += rowBounds.bottom - bounds.bottom;
+  }, [follow, selected, selectedIndex, page]);
 
   function filter(key: keyof typeof filters, value: string) {
+    onLeaveFollow();
     setFilters((current) => ({ ...current, [key]: value }));
     setPage(0);
+  }
+  function changePage(page: number) {
+    onLeaveFollow();
+    setPage(page);
   }
   function selectFilter(
     key: "stage" | "health",
@@ -87,7 +137,11 @@ export function Pipeline({
         >
           <option value="">Any</option>
           {options.map((option) => (
-            <option key={option}>{option}</option>
+            <option key={option} value={option}>
+              {key === "health"
+                ? healthLabels[option as keyof typeof healthLabels]
+                : option}
+            </option>
           ))}
         </select>
       </label>
@@ -121,6 +175,14 @@ export function Pipeline({
     <>
       <fieldset className="filters">
         <legend>Filter opportunities</legend>
+        <label className="pipeline-search">
+          Search opportunities and accounts
+          <input
+            type="search"
+            value={filters.search}
+            onChange={(event) => filter("search", event.target.value)}
+          />
+        </label>
         {selectFilter("stage", "Stage", stages)}
         {selectFilter("health", "Health", [
           "Green",
@@ -135,21 +197,42 @@ export function Pipeline({
         <button
           className="quiet"
           onClick={() => {
+            onLeaveFollow();
             setFilters(emptyFilters);
             setPage(0);
           }}
         >
-          Clear filters
+          Clear search and filters
         </button>
       </fieldset>
       <p className="table-summary" role="status">
         {rows.length} of {data.rows.length} opportunities
       </p>
+      {filteredSelection && hiddenBy.length > 0 && (
+        <div className="notice filtered-selection">
+          <p role="status">
+            <strong>{filteredSelection.Name}</strong> is still selected. It no
+            longer matches the current {hiddenBy.join(", ")} criteria.
+          </p>
+          <button
+            className="quiet"
+            onClick={() => {
+              setFilters(emptyFilters);
+              onFollow(filteredSelection.Id);
+            }}
+          >
+            Clear search and filters and show row
+          </button>
+        </div>
+      )}
       {!visible.length ? (
-        <p className="notice">No opportunities match these filters.</p>
+        <p className="notice">
+          No opportunities match the current search and filters.
+        </p>
       ) : (
         <>
           <div
+            ref={tableRegion}
             className="table-scroll"
             role="region"
             aria-label="Pipeline table"
@@ -174,6 +257,7 @@ export function Pipeline({
                       <button
                         className="sort"
                         onClick={() => {
+                          onLeaveFollow();
                           setSort({
                             key: column.key,
                             ascending:
@@ -196,38 +280,51 @@ export function Pipeline({
                 </tr>
               </thead>
               <tbody>
-                {visible.map((row) => (
-                  <tr
-                    key={row.Id}
-                    className={selected === row.Id ? "selected" : undefined}
-                  >
-                    <th scope="row">
-                      {row.AccountId && row.accountName ? (
-                        <button
-                          className="opportunity"
-                          aria-pressed={selected === row.Id}
-                          onClick={() => onSelect(row)}
-                        >
-                          {row.Name}
-                        </button>
-                      ) : (
-                        row.Name
-                      )}
-                      <small>{row.accountName ?? "Account unavailable"}</small>
-                    </th>
-                    <td>{row.StageName ?? "Unavailable"}</td>
-                    <td>
-                      {row.CloseDate ?? "Unavailable"}
-                      {row.CloseDate && row.CloseDate < data.today && (
-                        <small className="overdue">Overdue</small>
-                      )}
-                    </td>
-                    <td>{amountText(row)}</td>
-                    <td>
-                      <HealthBadge health={row.health} />
-                    </td>
-                  </tr>
-                ))}
+                {visible.map((row) => {
+                  const previewed = preview?.opportunityId === row.Id;
+                  const closeDate = previewed ? preview.date : row.CloseDate;
+                  return (
+                    <tr
+                      key={row.Id}
+                      ref={selected === row.Id ? selectedRow : undefined}
+                      className={selected === row.Id ? "selected" : undefined}
+                    >
+                      <th scope="row">
+                        {row.AccountId && row.accountName ? (
+                          <button
+                            className="opportunity"
+                            aria-pressed={selected === row.Id}
+                            onClick={() => {
+                              changePage(page);
+                              onSelect(row);
+                            }}
+                          >
+                            {row.Name}
+                          </button>
+                        ) : (
+                          row.Name
+                        )}
+                        <small>
+                          {row.accountName
+                            ? accountDisplayName(row.accountName)
+                            : "Account unavailable"}
+                        </small>
+                      </th>
+                      <td>{row.StageName ?? "Unavailable"}</td>
+                      <td>
+                        {closeDate ?? "Unavailable"}
+                        {previewed && <small>Saving date…</small>}
+                        {closeDate && closeDate < data.today && (
+                          <small className="overdue">Overdue</small>
+                        )}
+                      </td>
+                      <td>{amountText(row)}</td>
+                      <td>
+                        <HealthBadge health={row.health} />
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -235,7 +332,7 @@ export function Pipeline({
             <button
               className="quiet"
               disabled={page === 0}
-              onClick={() => setPage((value) => value - 1)}
+              onClick={() => changePage(page - 1)}
             >
               Previous
             </button>
@@ -245,7 +342,7 @@ export function Pipeline({
             <button
               className="quiet"
               disabled={page + 1 >= pages}
-              onClick={() => setPage((value) => value + 1)}
+              onClick={() => changePage(page + 1)}
             >
               Next
             </button>

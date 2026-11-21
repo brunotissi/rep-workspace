@@ -1,5 +1,12 @@
 import express, { type Request, type Response } from "express";
-import { recordId, workspace, WorkspaceError } from "./workspace";
+import {
+  recordId,
+  workspace,
+  WorkspaceError,
+  type DescribeCache,
+  type SalesforceWrite
+} from "./workspace";
+import { parseAction, performAction, recommendations } from "./actions";
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 
@@ -29,7 +36,7 @@ type Tokens = {
 type Session = Tokens & {
   expires: number;
   refreshing?: Promise<boolean>;
-  fields: Map<string, Promise<Set<string>>>;
+  fields: DescribeCache;
   profile?: { userId: string; username: string };
 };
 const pending = new Map<
@@ -40,7 +47,7 @@ const sessions = new Map<string, Session>();
 const random = () => randomBytes(32).toString("base64url");
 const cookieOptions = { httpOnly: true, sameSite: "lax" as const, path: "/" };
 
-const app = express();
+export const app = express();
 app.disable("x-powered-by");
 app.use((req, res, next) => {
   if (req.get("host") !== "localhost:5173") {
@@ -157,10 +164,19 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
-async function salesforce(session: Session, path: string) {
+async function salesforce(
+  session: Session,
+  path: string,
+  write?: SalesforceWrite
+) {
   const request = () =>
     fetch(new URL(path, session.instance_url), {
-      headers: { Authorization: "Bearer " + session.access_token },
+      method: write?.method,
+      headers: {
+        Authorization: "Bearer " + session.access_token,
+        ...(write ? { "Content-Type": "application/json" } : {})
+      },
+      body: write ? JSON.stringify(write.body) : undefined,
       signal: AbortSignal.timeout(15000),
       redirect: "error"
     });
@@ -205,7 +221,10 @@ function readRoute(
       res.json(
         await handler(
           req,
-          workspace((path) => salesforce(session, path), session.fields),
+          workspace(
+            (path, write) => salesforce(session, path, write),
+            session.fields
+          ),
           session
         )
       );
@@ -218,7 +237,8 @@ function readRoute(
         error:
           error instanceof WorkspaceError
             ? error.message
-            : "Salesforce is temporarily unavailable."
+            : "Salesforce is temporarily unavailable.",
+        uncertain: error instanceof WorkspaceError && error.uncertain
       });
     }
   };
@@ -268,7 +288,47 @@ app.get(
   readRoute(async (req, service) => {
     if (!recordId(req.params.id))
       throw new WorkspaceError(400, "Invalid account.");
-    return service.snapshot(req.params.id, today());
+    const selected = req.query.opportunity;
+    if (selected !== undefined && !recordId(selected))
+      throw new WorkspaceError(400, "Invalid opportunity.");
+    const snapshot = await service.snapshot(req.params.id, today(), selected);
+    return {
+      ...snapshot,
+      actions: selected
+        ? await recommendations(service, snapshot, selected)
+        : undefined
+    };
+  })
+);
+
+app.post(
+  "/api/actions",
+  (req, res, next) => {
+    if (req.get("origin") !== origin) {
+      res.sendStatus(403);
+      return;
+    }
+    if (!req.is("application/json")) {
+      res.sendStatus(415);
+      return;
+    }
+    express.json({ limit: "4kb" })(req, res, (error) => {
+      if (error) {
+        res
+          .status(error.status === 413 ? 413 : 400)
+          .json({ error: "Invalid action request." });
+        return;
+      }
+      next();
+    });
+  },
+  readRoute(async (req, service, session) => {
+    const action = parseAction(req.body, today());
+    return performAction(
+      service,
+      (await profile(service, session)).userId,
+      action
+    );
   })
 );
 
@@ -289,4 +349,3 @@ setInterval(() => {
   for (const [id, entry] of sessions)
     if (entry.expires <= now) sessions.delete(id);
 }, 60_000).unref();
-app.listen(5173, "localhost", () => console.log("Rep Workspace: " + origin));

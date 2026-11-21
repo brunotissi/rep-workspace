@@ -1,9 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { runAction, withCloseDate } from "../client/actions";
+import { ApiError } from "../client/api";
 import { accountHealth } from "../server/health";
 import { workspace, WorkspaceError, recordId } from "../server/workspace";
-import { emptyFilters, selectRows, type Row } from "../client/pipeline";
-import { amountText } from "../client/PipelineView";
+import {
+  accountDisplayName,
+  emptyFilters,
+  excludingFilters,
+  pipelinePage,
+  selectRows,
+  type Row
+} from "../client/pipeline";
+import { amountText, HealthBadge, Pipeline } from "../client/PipelineView";
 
 const today = "2026-11-21";
 const accountId = "001000000000001AAA";
@@ -271,4 +282,222 @@ test("filters and sorts the full pipeline before slicing a display page", () => 
     ).map((row) => row.Id),
     ["b", "a", "d"]
   );
+});
+
+const sampleAccount =
+  "RW Demo 01234567-89AB-cdef-0123-456789abcdef | Cobalt Payments";
+const sampleOpportunity: Row = {
+  Id: "006000000000101AAA",
+  Name: "Field expansion",
+  AccountId: accountId,
+  accountName: sampleAccount,
+  StageName: "Proposal",
+  CloseDate: "2026-11-16",
+  Amount: 2500,
+  health: {
+    status: "Amber",
+    reasons: ["Needs a follow-up."],
+    incomplete: false
+  }
+};
+const closeSort = { key: "CloseDate", ascending: true } as const;
+const tableRows = [
+  sampleOpportunity,
+  ...Array.from({ length: 110 }, (_, index): Row => ({
+    ...sampleOpportunity,
+    Id: "other-" + index,
+    Name: "Renewal " + index,
+    accountName: "Ordinary account",
+    CloseDate: "2026-12-01"
+  }))
+];
+
+test("display names remove only the exact seed prefix and do not change record identity", () => {
+  assert.equal(accountDisplayName(sampleAccount), "Cobalt Payments");
+  for (const ordinary of [
+    "Cobalt Payments",
+    "RW Demo | Cobalt Payments",
+    "RW Demo not-a-guid | Cobalt Payments",
+    "Partner RW Demo 01234567-89AB-cdef-0123-456789abcdef | Cobalt Payments",
+    "rw demo 01234567-89AB-cdef-0123-456789abcdef | Cobalt Payments"
+  ]) {
+    assert.equal(accountDisplayName(ordinary), ordinary);
+  }
+  assert.equal(sampleOpportunity.accountName, sampleAccount);
+});
+
+test("case-insensitive search matches displayed account or opportunity names and composes with every filter", () => {
+  for (const search of [" CoBaLt PAY ", "ExPANSION"]) {
+    const filters = {
+      ...emptyFilters,
+      search,
+      stage: "Proposal",
+      health: "Amber",
+      from: "2026-11-15",
+      through: "2026-11-21",
+      minimum: "2000",
+      maximum: "3000"
+    };
+    assert.deepEqual(selectRows(tableRows, filters, closeSort), [
+      sampleOpportunity
+    ]);
+  }
+  assert.deepEqual(
+    selectRows(
+      tableRows,
+      { ...emptyFilters, search: "cobalt", health: "Red" },
+      closeSort
+    ),
+    []
+  );
+  assert.deepEqual(
+    selectRows(tableRows, { ...emptyFilters, search: "89AB-cdef" }, closeSort),
+    []
+  );
+  const results = selectRows(
+    tableRows,
+    { ...emptyFilters, search: "cobalt" },
+    closeSort
+  );
+  assert.equal(pipelinePage(results, 2).page, 0);
+});
+
+test("confirmed close-date saves follow the selected row across pages and respect exclusions", async () => {
+  let committed = tableRows;
+  let displayedPage = 0;
+  const changed = {
+    kind: "closeDate" as const,
+    opportunityId: sampleOpportunity.Id,
+    accountId,
+    previousDate: sampleOpportunity.CloseDate!,
+    date: "2026-12-05"
+  };
+  await runAction(
+    changed,
+    {
+      preview: () => {
+        // The table renders a pending date separately, so this sort uses committed rows.
+        const page = pipelinePage(
+          selectRows(committed, emptyFilters, closeSort),
+          0
+        );
+        if (committed === tableRows)
+          assert.equal(page.visible[0].Id, sampleOpportunity.Id);
+      },
+      confirm: () => {
+        committed = withCloseDate(committed, changed);
+        displayedPage = pipelinePage(
+          selectRows(committed, emptyFilters, closeSort),
+          0,
+          sampleOpportunity.Id
+        ).page;
+      },
+      reject: () => assert.fail("The save should succeed."),
+      refresh: () => {}
+    },
+    async () => ({ message: "Saved" })
+  );
+  assert.equal(displayedPage, 2);
+  const refreshed = committed.map((row) => ({ ...row }));
+  const positioned = pipelinePage(
+    selectRows(refreshed, emptyFilters, closeSort),
+    0,
+    sampleOpportunity.Id
+  );
+  assert.equal(positioned.page, 2);
+  assert.equal(positioned.visible.at(-1)?.Id, sampleOpportunity.Id);
+  assert.equal(
+    pipelinePage(
+      selectRows(refreshed, emptyFilters, { ...closeSort, ascending: false }),
+      0,
+      sampleOpportunity.Id
+    ).page,
+    0
+  );
+  const restrictive = {
+    ...emptyFilters,
+    through: "2026-11-21",
+    search: "cobalt"
+  };
+  assert.equal(
+    pipelinePage(
+      selectRows(refreshed, restrictive, closeSort),
+      0,
+      sampleOpportunity.Id
+    ).selectedIndex,
+    -1
+  );
+  assert.deepEqual(excludingFilters(refreshed[0], restrictive), ["close date"]);
+  const html = renderToStaticMarkup(
+    createElement(Pipeline, {
+      data: { today, rows: refreshed, accountWarning: undefined },
+      selected: sampleOpportunity.Id,
+      follow: { id: sampleOpportunity.Id },
+      onFollow: () => {},
+      onLeaveFollow: () => {},
+      onSelect: () => {}
+    })
+  );
+  assert.match(html, /class="selected"/);
+  assert.match(html, /aria-pressed="true">Field expansion/);
+  assert.match(html, /Page 3 of 3/);
+  assert.match(html, /Cobalt Payments/);
+  assert.doesNotMatch(html, /01234567-89AB/);
+});
+
+test("failed close-date preview leaves the sorted selected row on its original page", async () => {
+  const filters = { ...emptyFilters, through: "2026-11-21" };
+  const changed = {
+    kind: "closeDate" as const,
+    opportunityId: sampleOpportunity.Id,
+    accountId,
+    previousDate: sampleOpportunity.CloseDate!,
+    date: "2026-12-05"
+  };
+  let displayedDate = changed.previousDate;
+  let rejected = false;
+  await runAction(
+    changed,
+    {
+      preview: (change) => {
+        displayedDate = change?.date ?? changed.previousDate;
+        const page = pipelinePage(
+          selectRows(tableRows, filters, closeSort),
+          0,
+          sampleOpportunity.Id
+        );
+        assert.equal(page.page, 0);
+        assert.equal(page.visible[0].Id, sampleOpportunity.Id);
+      },
+      confirm: () =>
+        assert.fail("A failed save must not change committed dates."),
+      reject: () => {
+        rejected = true;
+      },
+      refresh: () =>
+        assert.fail("A known validation rejection needs no reconciliation.")
+    },
+    async () => {
+      assert.equal(displayedDate, changed.date);
+      throw new ApiError(422, "Date rejected");
+    }
+  );
+  assert.equal(rejected, true);
+  assert.equal(displayedDate, changed.previousDate);
+});
+
+test("health badges render a decorative dot and meaningful text for each classification", () => {
+  for (const [status, label] of [
+    ["Green", "Healthy"],
+    ["Amber", "At risk"],
+    ["Red", "Needs attention"]
+  ] as const) {
+    const html = renderToStaticMarkup(
+      createElement(HealthBadge, {
+        health: { status, reasons: [], incomplete: false }
+      })
+    );
+    assert.match(html, /health-dot" aria-hidden="true"/);
+    assert.ok(html.includes(label));
+  }
 });

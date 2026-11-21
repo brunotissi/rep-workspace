@@ -2,6 +2,7 @@ export type Health = {
   status: "Green" | "Amber" | "Red";
   reasons: string[];
   incomplete: boolean;
+  activity?: Evidence["activity"];
 };
 
 type Evidence = {
@@ -52,9 +53,10 @@ export function accountHealth(evidence: Evidence, today: string): Health {
     return {
       status: "Green",
       incomplete,
+      activity,
       reasons: [
         "Recent activity, open pipeline, and a visible decision maker. No close date is within seven days."
       ]
     };
-  return { status: critical ? "Red" : "Amber", incomplete, reasons };
+  return { status: critical ? "Red" : "Amber", incomplete, reasons, activity };
 }

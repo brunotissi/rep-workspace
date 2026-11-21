@@ -1,6 +1,6 @@
-﻿import type { ReactNode } from "react";
+import type { ReactNode } from "react";
 import { HealthBadge, ReadError, amountText } from "./PipelineView";
-import type { SnapshotData } from "./pipeline";
+import { accountDisplayName, type SnapshotData } from "./pipeline";
 
 function ListSection<T>({
   title,
@@ -71,7 +71,7 @@ export function Snapshot({ data }: { data: SnapshotData }) {
     <>
       <div className="account-heading">
         <div>
-          <h3>{account.Name}</h3>
+          <h3>{accountDisplayName(account.Name)}</h3>
           <p>Owner · {account.Owner?.Name ?? "Unavailable"}</p>
         </div>
         <HealthBadge health={"data" in health ? health.data : undefined} />

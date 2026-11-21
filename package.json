@@ -10,15 +10,15 @@
     "test:unit:watch": "sfdx-lwc-jest --watch",
     "test:unit:debug": "sfdx-lwc-jest --debug",
     "test:unit:coverage": "sfdx-lwc-jest --coverage",
-    "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
-    "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+    "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,ts,tsx,mts,json,md,page,trigger,xml,yaml,yml}\"",
+    "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,ts,tsx,mts,json,md,page,trigger,xml,yaml,yml}\"",
     "prepare": "husky || true",
     "precommit": "lint-staged",
     "build": "tsc --noEmit && vite build",
-    "start": "node --env-file-if-exists=.env --import tsx server/index.ts",
+    "start": "node --env-file-if-exists=.env --import tsx server/start.ts",
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit",
-    "test:workspace": "node --import tsx --test tests/workspace.test.ts"
+    "test:workspace": "node --import tsx --test tests/workspace.test.ts tests/actions.test.ts tests/action-route.test.ts tests/notifications.test.ts"
   },
   "devDependencies": {
     "@lwc/eslint-plugin-lwc": "^3.1.0",

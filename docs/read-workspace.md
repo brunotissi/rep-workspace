@@ -49,6 +49,8 @@ $seed
 
 The CLI resolves the target owner in the selected org and explicitly sets ownership on accounts, contacts, tasks and opportunities. IDs for relationships are read back from Salesforce. Reuse requires an exact dataset marker in the description, the expected key and relationships, and the correct owner. Roles are identified through their two verified parent records and role value. The script refuses conflicting keys, inserts only missing records, and verifies the results. Run one process per dataset. Each batch is atomic, while completed batches from a failed run can remain. Allow an in-flight request to finish before retrying. Custom org automation, record types and duplicate rules can affect inserts. The script has no delete mode because deleting an account can also delete records added outside the seed.
 
+Verify is strict by default. An intentional demo edit to a seeded close date will cause it to report a mismatch against the original seed. Keep the original checkpoint and compare the exact Opportunity ID, original value, and approved new value with a read-only Salesforce query. Also recheck the open EUR count, owner, and relationships against the seed dataset. A separately created follow-up or contact role can be verified by its own ID. Use a new dataset GUID when you need a pristine seed for a repeatable demonstration.
+
 ## Verify the seeded dataset through the app
 
 Restart the app, sign in as the configured owner, and open DevTools. The pipeline endpoint uses the actual app filters for ownership and the production account health rules. Run this in the console with the GUID printed by PowerShell:
@@ -94,3 +96,21 @@ For performance evidence, disable the browser cache in DevTools, reload three ti
 ### Verified performance
 
 The 1,080-opportunity EUR demo dataset was verified in the browser. Three measured application requests to `/api/pipeline` took **1.26 s, 1.23 s, and 1.12 s** (median **1.23 s**). Sorting, filtering, and paging remained responsive and sent zero additional pipeline requests. The app batches Salesforce reads by account, uses query continuation when needed, and renders up to 50 rows per page.
+
+## Next best actions
+
+The selected opportunity can show up to three recommendations. The app ranks an overdue close date first, then missing or stale completed account activity (using the same 21-day evidence as health), then missing visible decision-maker coverage on the selected opportunity. An existing open workspace follow-up suppresses a second follow-up recommendation. Unknown evidence suppresses that rule. Salesforce object and field permissions determine which controls and contacts are available.
+
+The server checks the selected opportunity is open, belongs to the signed-in rep, and belongs to the selected account before writing. A contact must be visible and on that account. The role action updates an existing role for that contact or creates a Decision Maker role without changing the primary-contact flag. The date action compares the submitted previous date with Salesforce before saving. A single localhost process suppresses overlapping action requests for the same target. Salesforce still decides whether the write is allowed.
+
+Run `npm test` to exercise recommendation ordering, action validation, writes against simulated Salesforce responses, and optimistic close-date rollback. No live Salesforce writes are needed for these tests.
+
+The Pipeline previews a pending close date in place and keeps its original sort position until Salesforce confirms the write. After confirmation, it follows the selected row to its new page using the current sort and filters. If a criterion excludes the row, the selection stays open in the snapshot and the Pipeline offers to clear the search and filters and show the row. Search matches displayed Opportunity and Account names across the loaded data.
+
+For a browser review, start the workspace and select **Cobalt Payments - Field expansion 02** on a freshly seeded dataset. On the anchor date it shows all three recommendations if the permissions and related records are still in their original state. Use Tab to reach each card and confirm the selected context and available inputs. Each live submission requires org-write approval. After approval, verify the saved Task, Close Date, and Opportunity Contact Role in Salesforce and check that the corresponding recommendations refresh. A remote time-out may leave the outcome unknown, in which case review the refreshed record before taking the action again.
+
+### Deferred UX refinements
+
+- The desktop-first Pipeline uses a horizontally scrollable table on narrow screens and a fixed page size of 50.
+- Search matches a substring of the displayed Account or Opportunity name. View preferences reset when the workspace reloads.
+- The action area shows one toast at a time for the current selection. Switching records clears it, and the next result replaces it.

@@ -1,8 +1,27 @@
 import { accountHealth } from "./health";
 
 const api = "/services/data/v68.0";
-type RequestSalesforce = (path: string) => Promise<Response>;
-type Field = { name: string };
+export type SalesforceWrite = {
+  method: "POST" | "PATCH";
+  body: Record<string, string>;
+};
+type RequestSalesforce = (
+  path: string,
+  write?: SalesforceWrite
+) => Promise<Response>;
+type Field = {
+  name: string;
+  createable?: boolean;
+  updateable?: boolean;
+  picklistValues?: { value: string; active: boolean; defaultValue: boolean }[];
+};
+type Describe = {
+  queryable: boolean;
+  createable?: boolean;
+  updateable?: boolean;
+  fields: Field[];
+};
+export type DescribeCache = Map<string, Promise<Describe>>;
 type Opportunity = {
   Id: string;
   Name: string;
@@ -29,6 +48,7 @@ type ActivityEvidence = { AccountId: string };
 type RoleEvidence = {
   Opportunity?: { AccountId: string };
   ContactId?: string;
+  OpportunityId?: string;
   IsPrimary?: boolean;
 };
 const soqlTime = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -36,7 +56,8 @@ const soqlTime = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 export class WorkspaceError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    readonly uncertain = false
   ) {
     super(message);
   }
@@ -69,7 +90,7 @@ function chunks<T>(items: T[], size: number) {
 
 export function workspace(
   request: RequestSalesforce,
-  fieldCache: Map<string, Promise<Set<string>>>
+  fieldCache: DescribeCache
 ) {
   async function get<T>(path: string): Promise<T> {
     const response = await request(path);
@@ -137,27 +158,98 @@ export function workspace(
     return records;
   }
 
-  function fields(object: string) {
+  function describe(object: string) {
     let cached = fieldCache.get(object);
     if (!cached) {
-      cached = get<{ queryable: boolean; fields: Field[] }>(
-        api + "/sobjects/" + object + "/describe"
-      )
-        .then((describe) => {
-          if (!describe.queryable)
-            throw new WorkspaceError(
-              403,
-              "This object is unavailable with your Salesforce permissions."
-            );
-          return new Set(describe.fields.map((field) => field.name));
-        })
-        .catch((error) => {
+      cached = get<Describe>(api + "/sobjects/" + object + "/describe").catch(
+        (error) => {
           fieldCache.delete(object);
           throw error;
-        });
+        }
+      );
       fieldCache.set(object, cached);
     }
     return cached;
+  }
+
+  async function fields(object: string) {
+    const metadata = await describe(object);
+    if (!metadata.queryable)
+      throw new WorkspaceError(
+        403,
+        "This object is unavailable with your Salesforce permissions."
+      );
+    return new Set(metadata.fields.map((field) => field.name));
+  }
+
+  async function write(object: string, change: SalesforceWrite, id?: string) {
+    const path = api + "/sobjects/" + object + (id ? "/" + id : "");
+    const unknownOutcome = () =>
+      new WorkspaceError(
+        502,
+        "Salesforce did not confirm the save. Check the refreshed record before trying again.",
+        true
+      );
+    const response = await request(path, change).catch(() => {
+      throw unknownOutcome();
+    });
+    if (response.status === 204 && change.method === "PATCH") return;
+    const data = await response.json().catch(() => null);
+    if (
+      response.ok &&
+      change.method === "POST" &&
+      data?.success === true &&
+      recordId(data.id)
+    )
+      return;
+    const codes: string[] = Array.isArray(data)
+      ? data.map((item) => item.errorCode)
+      : [];
+    if (response.status === 401)
+      throw new WorkspaceError(
+        401,
+        "Your Salesforce session expired. Sign in again."
+      );
+    if (response.status === 429 || codes.includes("REQUEST_LIMIT_EXCEEDED"))
+      throw new WorkspaceError(
+        429,
+        "The Salesforce API limit was reached. Try again later."
+      );
+    if (
+      codes.some((code) =>
+        ["UNABLE_TO_LOCK_ROW", "ENTITY_IS_LOCKED"].includes(code)
+      )
+    )
+      throw new WorkspaceError(
+        409,
+        "Salesforce has locked this record. Try again after it is unlocked."
+      );
+    if (
+      response.status === 403 ||
+      codes.some((code) =>
+        [
+          "INSUFFICIENT_ACCESS_OR_READONLY",
+          "INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY",
+          "INVALID_FIELD_FOR_INSERT_UPDATE",
+          "INVALID_TYPE",
+          "OP_WITH_INVALID_USER_TYPE_EXCEPTION"
+        ].includes(code)
+      )
+    )
+      throw new WorkspaceError(
+        403,
+        "Salesforce denied permission to save this change."
+      );
+    if (response.status === 404)
+      throw new WorkspaceError(
+        404,
+        "The Salesforce record is no longer available."
+      );
+    if (response.ok || response.status >= 500) throw unknownOutcome();
+    throw new WorkspaceError(
+      422,
+      "Salesforce rejected the change. Check the values and your org's validation rules."
+    );
   }
 
   async function opportunities(where: string) {
@@ -329,7 +421,11 @@ export function workspace(
     };
   }
 
-  async function snapshot(id: string, today: string) {
+  async function snapshot(
+    id: string,
+    today: string,
+    selectedOpportunityId?: string
+  ) {
     const match = "'" + id + "'";
     const [account] = await accountRecords("Id = " + match);
     if (!account) throw new WorkspaceError(404, "This account is unavailable.");
@@ -362,7 +458,7 @@ export function workspace(
         ),
         evidence([id], today).then((result) => result.get(id)!),
         query<RoleEvidence>(
-          "SELECT ContactId FROM OpportunityContactRole WHERE Role = 'Decision Maker'" +
+          "SELECT ContactId, OpportunityId FROM OpportunityContactRole WHERE Role = 'Decision Maker'" +
             " AND Opportunity.IsClosed = false AND Opportunity.AccountId = " +
             match
         )
@@ -376,6 +472,12 @@ export function workspace(
       tasks: section(tasks),
       events: section(events),
       health: section(health),
+      selectedDecisionMaker:
+        selectedOpportunityId && "data" in roles
+          ? roles.data.some(
+              (role) => role.OpportunityId === selectedOpportunityId
+            )
+          : undefined,
       decisionMakerIds:
         "data" in roles
           ? [
@@ -386,5 +488,5 @@ export function workspace(
           : []
     };
   }
-  return { get, pipeline, snapshot };
+  return { get, query, describe, write, pipeline, snapshot };
 }
