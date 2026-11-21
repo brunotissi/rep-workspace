@@ -1,0 +1,9 @@
+:root { font-family: system-ui, sans-serif; color: #182438; background: #f2f5fa; }
+body { margin: 0; }
+main { max-width: 52rem; margin: 3rem auto; padding: 0 1.25rem; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+section { background: white; border: 1px solid #d8e0eb; border-radius: .75rem; padding: 1.5rem; }
+.button, button { display: inline-block; border: 0; border-radius: .4rem; background: #174892; color: white; font: inherit; padding: .6rem .9rem; text-decoration: none; cursor: pointer; }
+:focus-visible { outline: 3px solid #245fbb; outline-offset: 4px; }
+[role=alert] { color: #a3232a; }
+li { padding: .25rem 0; }
