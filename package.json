@@ -5,7 +5,7 @@
   "description": "Salesforce App",
   "scripts": {
     "lint": "eslint **/{aura,lwc}/**/*.js",
-    "test": "npm run test:unit",
+    "test": "npm run test:workspace",
     "test:unit": "sfdx-lwc-jest",
     "test:unit:watch": "sfdx-lwc-jest --watch",
     "test:unit:debug": "sfdx-lwc-jest --debug",
@@ -17,7 +17,8 @@
     "build": "tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env --import tsx server/index.ts",
     "dev": "npm run build && npm start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:workspace": "node --import tsx --test tests/workspace.test.ts"
   },
   "devDependencies": {
     "@lwc/eslint-plugin-lwc": "^3.1.0",
