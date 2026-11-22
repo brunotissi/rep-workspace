@@ -21,7 +21,10 @@ type Describe = {
   updateable?: boolean;
   fields: Field[];
 };
-export type DescribeCache = Map<string, Promise<Describe>>;
+export type DescribeCache = Map<
+  string,
+  { expires: number; value: Promise<Describe> }
+>;
 type Opportunity = {
   Id: string;
   Name: string;
@@ -53,11 +56,23 @@ type RoleEvidence = {
 };
 const soqlTime = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
+type ReadDiagnostic = { httpStatus: number; code?: string; field?: string };
+const taskLookupFields = ["Id", "WhatId", "IsClosed", "Subject"];
+const safeQueryCodes = new Set([
+  "INVALID_FIELD",
+  "INVALID_TYPE",
+  "MALFORMED_QUERY",
+  "INVALID_QUERY_FILTER_OPERATOR",
+  "INSUFFICIENT_ACCESS_OR_READONLY",
+  "REQUEST_LIMIT_EXCEEDED"
+]);
+
 export class WorkspaceError extends Error {
   constructor(
     readonly status: number,
     message: string,
-    readonly uncertain = false
+    readonly uncertain = false,
+    readonly readDiagnostic?: ReadDiagnostic
   ) {
     super(message);
   }
@@ -96,17 +111,32 @@ export function workspace(
     const response = await request(path);
     const data = await response.json().catch(() => null);
     if (!response.ok) {
+      const upstream = Array.isArray(data)
+        ? data.find((item) => safeQueryCodes.has(item?.errorCode))
+        : undefined;
+      const field =
+        typeof upstream?.message === "string"
+          ? upstream.message.match(
+              /(?:no such column|field)\s+['"](\w+)['"]/i
+            )?.[1]
+          : undefined;
+      const diagnostic = {
+        httpStatus: response.status,
+        code: upstream?.errorCode,
+        field: taskLookupFields.find(
+          (name) => name.toLowerCase() === field?.toLowerCase()
+        )
+      };
+      const failure = (status: number, message: string) =>
+        new WorkspaceError(status, message, false, diagnostic);
       if (response.status === 401)
-        throw new WorkspaceError(
-          401,
-          "Your Salesforce session expired. Sign in again."
-        );
+        throw failure(401, "Your Salesforce session expired. Sign in again.");
       if (
         response.status === 429 ||
         (Array.isArray(data) &&
-          data.some((item) => item.errorCode === "REQUEST_LIMIT_EXCEEDED"))
+          data.some((item) => item?.errorCode === "REQUEST_LIMIT_EXCEEDED"))
       ) {
-        throw new WorkspaceError(
+        throw failure(
           429,
           "The Salesforce API limit was reached. Try again later."
         );
@@ -119,18 +149,15 @@ export function workspace(
               "INVALID_FIELD",
               "INVALID_TYPE",
               "INSUFFICIENT_ACCESS_OR_READONLY"
-            ].includes(item.errorCode)
+            ].includes(item?.errorCode)
           ))
       ) {
-        throw new WorkspaceError(
+        throw failure(
           403,
           "This information is unavailable with your Salesforce permissions."
         );
       }
-      throw new WorkspaceError(
-        502,
-        "Salesforce could not load this information."
-      );
+      throw failure(502, "Salesforce could not load this information.");
     }
     if (!data)
       throw new WorkspaceError(
@@ -144,9 +171,21 @@ export function workspace(
     let path: string | undefined =
       api + "/query?" + new URLSearchParams({ q: soql });
     const records: T[] = [];
+    const visited = new Set<string>();
     while (path) {
+      if (visited.has(path))
+        throw new WorkspaceError(
+          502,
+          "Salesforce pagination could not continue."
+        );
+      visited.add(path);
       const page: { records: T[]; done: boolean; nextRecordsUrl?: string } =
         await get(path);
+      if (!Array.isArray(page.records) || typeof page.done !== "boolean")
+        throw new WorkspaceError(
+          502,
+          "Salesforce returned an unreadable query response."
+        );
       records.push(...page.records);
       path = page.done ? undefined : page.nextRecordsUrl;
       if (!page.done && !path?.startsWith(api + "/query/"))
@@ -159,17 +198,17 @@ export function workspace(
   }
 
   function describe(object: string) {
-    let cached = fieldCache.get(object);
-    if (!cached) {
-      cached = get<Describe>(api + "/sobjects/" + object + "/describe").catch(
-        (error) => {
-          fieldCache.delete(object);
-          throw error;
-        }
-      );
-      fieldCache.set(object, cached);
-    }
-    return cached;
+    const cached = fieldCache.get(object);
+    const now = Date.now();
+    if (cached && cached.expires > now) return cached.value;
+    const value = get<Describe>(
+      api + "/sobjects/" + object + "/describe"
+    ).catch((error) => {
+      if (fieldCache.get(object)?.value === value) fieldCache.delete(object);
+      throw error;
+    });
+    fieldCache.set(object, { expires: now + 60_000, value });
+    return value;
   }
 
   async function fields(object: string) {
@@ -190,7 +229,8 @@ export function workspace(
         "Salesforce did not confirm the save. Check the refreshed record before trying again.",
         true
       );
-    const response = await request(path, change).catch(() => {
+    const response = await request(path, change).catch((error) => {
+      if (error instanceof WorkspaceError) throw error;
       throw unknownOutcome();
     });
     if (response.status === 204 && change.method === "PATCH") return;
@@ -269,6 +309,37 @@ export function workspace(
         where +
         " ORDER BY Id"
     );
+  }
+
+  async function requireOpenOpportunity(
+    userId: string,
+    accountId: string,
+    opportunityId?: string,
+    includeCloseDate = false
+  ) {
+    if (
+      !recordId(userId) ||
+      !recordId(accountId) ||
+      (opportunityId !== undefined && !recordId(opportunityId))
+    )
+      throw new WorkspaceError(400, "Invalid opportunity context.");
+    const [opportunity] = await query<{ Id: string; CloseDate?: string }>(
+      "SELECT Id" +
+        (includeCloseDate ? ", CloseDate" : "") +
+        " FROM Opportunity WHERE AccountId = '" +
+        accountId +
+        "' AND OwnerId = '" +
+        userId +
+        "' AND IsClosed = false" +
+        (opportunityId ? " AND Id = '" + opportunityId + "'" : "") +
+        " LIMIT 1"
+    );
+    if (!opportunity)
+      throw new WorkspaceError(
+        404,
+        "The selected account or opportunity is unavailable in your pipeline."
+      );
+    return opportunity;
   }
 
   async function accountRecords(where: string) {
@@ -387,6 +458,7 @@ export function workspace(
   }
 
   async function pipeline(userId: string, today: string) {
+    const amountAvailable = (await fields("Opportunity")).has("Amount");
     const rows = await opportunities("OwnerId = '" + userId + "'");
     const ids = [...new Set(rows.map((row) => row.AccountId).filter(recordId))];
     const names = new Map<string, string>();
@@ -407,6 +479,7 @@ export function workspace(
       throw namesResult;
     return {
       today,
+      amountAvailable,
       accountWarning: namesResult
         ? "Some Salesforce account names could not be loaded."
         : undefined,
@@ -442,13 +515,26 @@ export function workspace(
               " ORDER BY Name, Id LIMIT 10"
           )
         ),
-        query<Activity>(
-          "SELECT Id, Subject, ActivityDate FROM Task WHERE AccountId = " +
-            match +
-            " AND IsClosed = true AND ActivityDate <= " +
-            today +
-            " ORDER BY ActivityDate DESC, Id LIMIT 10"
-        ),
+        fields("Task").then(async (available) => {
+          const dateReadable = available.has("ActivityDate");
+          const columns = [
+            "Id",
+            ...["Subject", "ActivityDate"].filter((name) => available.has(name))
+          ];
+          const rows = await query<Activity>(
+            "SELECT " +
+              columns.join(", ") +
+              " FROM Task WHERE AccountId = " +
+              match +
+              " AND IsClosed = true" +
+              (dateReadable
+                ? " AND ActivityDate <= " +
+                  today +
+                  " ORDER BY ActivityDate DESC, Id LIMIT 10"
+                : " ORDER BY Id LIMIT 10")
+          );
+          return { rows, dateReadable };
+        }),
         query<Activity>(
           "SELECT Id, Subject, ActivityDateTime FROM Event WHERE AccountId = " +
             match +
@@ -464,12 +550,21 @@ export function workspace(
         )
       ]);
     const roles = section(decisionMakers);
+    const taskResult = section(tasks);
+    const taskSection:
+      { data: Activity[]; datesUnavailable?: boolean } | { error: string } =
+      "data" in taskResult
+        ? {
+            data: taskResult.data.rows,
+            datesUnavailable: !taskResult.data.dateReadable
+          }
+        : taskResult;
     return {
       account,
       today,
       opportunities: section(open),
       contacts: section(contacts),
-      tasks: section(tasks),
+      tasks: taskSection,
       events: section(events),
       health: section(health),
       selectedDecisionMaker:
@@ -488,5 +583,13 @@ export function workspace(
           : []
     };
   }
-  return { get, query, describe, write, pipeline, snapshot };
+  return {
+    get,
+    query,
+    describe,
+    write,
+    pipeline,
+    snapshot,
+    requireOpenOpportunity
+  };
 }

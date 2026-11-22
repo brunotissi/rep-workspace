@@ -262,6 +262,9 @@ function App() {
   }
   return (
     <>
+      <a className="skip-link" href="#main-content">
+        Skip to workspace
+      </a>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
@@ -278,7 +281,7 @@ function App() {
           </div>
         )}
       </header>
-      <main>
+      <main id="main-content" tabIndex={-1}>
         {logoutError && <ReadError>Could not sign out. Try again.</ReadError>}
         {session.loading && (
           <p className="notice" role="status">

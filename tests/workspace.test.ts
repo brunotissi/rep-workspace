@@ -15,6 +15,7 @@ import {
   type Row
 } from "../client/pipeline";
 import { amountText, HealthBadge, Pipeline } from "../client/PipelineView";
+import { Snapshot } from "../client/Snapshot";
 
 const today = "2026-11-21";
 const accountId = "001000000000001AAA";
@@ -27,6 +28,81 @@ const healthy = {
   decisionMaker: true
 };
 const json = (records: unknown[]) => Response.json({ records, done: true });
+
+test("missing Task due-date access preserves the readable task and does not manufacture stale activity", async () => {
+  const service = workspace(async (path) => {
+    if (path.endsWith("/describe")) {
+      return Response.json({
+        queryable: true,
+        fields: path.includes("/Task/")
+          ? [{ name: "Subject" }]
+          : [{ name: "CloseDate" }]
+      });
+    }
+    const soql = new URL(path, "https://example.com").searchParams.get("q")!;
+    if (soql.includes("FROM Account"))
+      return json([{ Id: accountId, Name: "Northstar Lab" }]);
+    if (soql.includes("MIN(CloseDate)"))
+      return json([
+        { AccountId: accountId, openCount: 2, nearestClose: "2026-11-15" }
+      ]);
+    if (soql.includes("FROM Task") && soql.includes("COUNT(Id)"))
+      return Response.json([{ errorCode: "INVALID_FIELD" }], { status: 400 });
+    if (soql.includes("FROM Task")) {
+      assert.doesNotMatch(soql, /ActivityDate/);
+      assert.match(soql, /AccountId.*IsClosed = true/);
+      return json([
+        { Id: "00T000000000001AAA", Subject: "Completed discovery" }
+      ]);
+    }
+    if (soql.includes("SELECT Opportunity.AccountId"))
+      return json([{ Opportunity: { AccountId: accountId } }]);
+    return json([]);
+  }, new Map());
+  const snapshot = await service.snapshot(accountId, today);
+  assert.ok("data" in snapshot.tasks);
+  assert.equal(snapshot.tasks.datesUnavailable, true);
+  assert.equal(snapshot.tasks.data[0]?.ActivityDate, undefined);
+  assert.ok("data" in snapshot.health);
+  assert.equal(snapshot.health.data.status, "Red");
+  assert.equal(snapshot.health.data.incomplete, true);
+  assert.equal(snapshot.health.data.activity, undefined);
+  assert.ok(
+    snapshot.health.data.reasons.includes(
+      "A visible open opportunity is overdue."
+    )
+  );
+  assert.doesNotMatch(
+    snapshot.health.data.reasons.join(" "),
+    /21 days|No completed task/
+  );
+  const html = renderToStaticMarkup(
+    createElement(Snapshot, { data: snapshot })
+  );
+  assert.match(html, /Task dates are unavailable/);
+  assert.match(html, /Completed discovery/);
+});
+
+test("unknown evidence alone renders a neutral Not assessed label, while confirmed risk stays distinct", () => {
+  const unknown = accountHealth(
+    { ...healthy, activity: undefined, decisionMaker: undefined },
+    today
+  );
+  assert.equal(unknown.unassessed, true);
+  assert.match(
+    renderToStaticMarkup(createElement(HealthBadge, { health: unknown })),
+    /Not assessed/
+  );
+  const knownRisk = accountHealth(
+    { ...healthy, activity: undefined, decisionMaker: false },
+    today
+  );
+  assert.equal(knownRisk.unassessed, false);
+  assert.match(
+    renderToStaticMarkup(createElement(HealthBadge, { health: knownRisk })),
+    /At risk/
+  );
+});
 
 test("health checks all inputs and handles the seven-day and overdue boundaries", () => {
   assert.equal(accountHealth(healthy, today).status, "Green");
@@ -126,6 +202,7 @@ test("pipeline reads Salesforce continuation pages, batches account evidence, an
   assert.equal(result.rows[1099].accountName, "Alder Logistics");
   assert.equal(result.rows[1099].health?.status, "Green");
   assert.equal(result.rows[1099].Amount, undefined);
+  assert.equal(result.amountAvailable, false);
   const ordered = selectRows(
     result.rows,
     { ...emptyFilters, health: "Green", stage: "Prospecting" },
@@ -430,7 +507,12 @@ test("confirmed close-date saves follow the selected row across pages and respec
   assert.deepEqual(excludingFilters(refreshed[0], restrictive), ["close date"]);
   const html = renderToStaticMarkup(
     createElement(Pipeline, {
-      data: { today, rows: refreshed, accountWarning: undefined },
+      data: {
+        today,
+        rows: refreshed,
+        accountWarning: undefined,
+        amountAvailable: true
+      },
       selected: sampleOpportunity.Id,
       follow: { id: sampleOpportunity.Id },
       onFollow: () => {},
@@ -441,8 +523,36 @@ test("confirmed close-date saves follow the selected row across pages and respec
   assert.match(html, /class="selected"/);
   assert.match(html, /aria-pressed="true">Field expansion/);
   assert.match(html, /Page 3 of 3/);
+  assert.match(html, /aria-disabled="true" aria-label="Next pipeline page"/);
+  assert.match(
+    html,
+    /aria-disabled="false" aria-label="Previous pipeline page"/
+  );
   assert.match(html, /Cobalt Payments/);
   assert.doesNotMatch(html, /01234567-89AB/);
+});
+
+test("malformed query pages and repeated Salesforce cursors stop with safe errors", async () => {
+  const invalid = workspace(
+    async () => Response.json({ records: [], done: "false" }),
+    new Map()
+  );
+  await assert.rejects(invalid.query("SELECT Id FROM Opportunity"), {
+    status: 502
+  });
+  let reads = 0;
+  const cyclic = workspace(async () => {
+    reads++;
+    return Response.json({
+      records: [],
+      done: false,
+      nextRecordsUrl: api + "/query/repeated"
+    });
+  }, new Map());
+  await assert.rejects(cyclic.query("SELECT Id FROM Opportunity"), {
+    status: 502
+  });
+  assert.equal(reads, 2);
 });
 
 test("failed close-date preview leaves the sorted selected row on its original page", async () => {
@@ -500,4 +610,23 @@ test("health badges render a decorative dot and meaningful text for each classif
     assert.match(html, /health-dot" aria-hidden="true"/);
     assert.ok(html.includes(label));
   }
+});
+
+test("unreadable Amount is labeled without exposing filter or sort controls", () => {
+  const html = renderToStaticMarkup(
+    createElement(Pipeline, {
+      data: {
+        today,
+        amountAvailable: false,
+        accountWarning: undefined,
+        rows: [{ ...sampleOpportunity, Amount: undefined }]
+      },
+      onSelect: () => {},
+      onFollow: () => {},
+      onLeaveFollow: () => {}
+    })
+  );
+  assert.match(html, /Amount filters are unavailable/);
+  assert.doesNotMatch(html, /Min amount|Max amount|class="sort">Amount/);
+  assert.match(html, /<td>Unavailable<\/td>/);
 });

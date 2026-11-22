@@ -38,6 +38,8 @@ const failure = (status: number, errorCode: string) =>
 type Fixture = {
   deniedField?: string;
   pendingTask?: boolean;
+  pendingTaskRead?: () => Response;
+  missingTaskField?: string;
   existingRole?: string;
   currentClose?: string;
   relatedOpportunity?: boolean;
@@ -65,6 +67,8 @@ function fixture(options: Fixture = {}) {
         createable: true,
         updateable: true,
         fields: [
+          "Id",
+          "IsClosed",
           "CloseDate",
           "WhatId",
           "Subject",
@@ -74,14 +78,20 @@ function fixture(options: Fixture = {}) {
           "OpportunityId",
           "ContactId",
           "Role"
-        ].map((name) => ({
-          name,
-          createable: name !== options.deniedField,
-          updateable: name !== options.deniedField,
-          picklistValues: [
-            { active: true, defaultValue: true, value: "Normal" }
-          ]
-        }))
+        ]
+          .filter(
+            (name) =>
+              !path.endsWith("/Task/describe") ||
+              name !== options.missingTaskField
+          )
+          .map((name) => ({
+            name,
+            createable: name !== options.deniedField,
+            updateable: name !== options.deniedField,
+            picklistValues: [
+              { active: true, defaultValue: true, value: "Normal" }
+            ]
+          }))
       });
     const query = new URL(path, "https://example.com").searchParams.get("q")!;
     if (query.includes("FROM Opportunity WHERE")) {
@@ -100,8 +110,16 @@ function fixture(options: Fixture = {}) {
     }
     if (query.includes("FROM TaskStatus"))
       return json([{ ApiName: "Not Started" }]);
-    if (query.includes("FROM Task WHERE"))
-      return json(options.pendingTask ? [{ Id: taskId }] : []);
+    if (query.includes("FROM Task WHERE")) {
+      assert.match(
+        query,
+        /^SELECT Id FROM Task WHERE WhatId = '.*' AND IsClosed = false AND Subject = 'Rep Workspace follow-up' LIMIT 1$/
+      );
+      return (
+        options.pendingTaskRead?.() ??
+        json(options.pendingTask ? [{ Id: taskId }] : [])
+      );
+    }
     if (query.includes("FROM Contact WHERE"))
       return json(options.relatedContact === false ? [] : [{ Id: contactId }]);
     if (query.includes("FROM OpportunityContactRole"))
@@ -167,6 +185,83 @@ test("recommendation controls reflect describe data and unavailable evidence", a
   assert.equal(result.items.length, 1);
   assert.equal(result.items[0].kind, "closeDate");
   assert.match(result.items[0].unavailable ?? "", /permissions/);
+});
+
+test("follow-up diagnostics distinguish an empty lookup from a Salesforce failure or unknown activity", async () => {
+  const base = {
+    account: { Id: accountId, Name: "Demo account" },
+    today,
+    opportunities: {
+      data: [{ Id: opportunityId, Name: "Renewal", CloseDate: today }]
+    },
+    contacts: { data: [] },
+    tasks: { data: [] },
+    events: { data: [] },
+    decisionMakerIds: [],
+    selectedDecisionMaker: true
+  };
+  let reads = 0;
+  const failed = fixture({
+    missingTaskField: "WhatId",
+    pendingTaskRead: () => {
+      reads++;
+      return Response.json(
+        [
+          {
+            errorCode: "INVALID_FIELD",
+            message: "No such column 'WhatId'. Private text."
+          }
+        ],
+        { status: 400 }
+      );
+    }
+  });
+  const snapshot = (activity: "stale" | undefined) => ({
+    ...base,
+    health: {
+      data: accountHealth(
+        { activity, openCount: 1, nearestClose: today, decisionMaker: true },
+        today
+      )
+    }
+  });
+  const skipped = await recommendations(
+    failed.service,
+    snapshot(undefined),
+    opportunityId
+  );
+  assert.deepEqual(skipped.followUp, {
+    activity: "unknown",
+    lookup: "skipped"
+  });
+  assert.equal(reads, 0);
+  assert.deepEqual(skipped.items, []);
+  const blocked = await recommendations(
+    failed.service,
+    snapshot("stale"),
+    opportunityId
+  );
+  assert.equal(reads, 1);
+  assert.equal(blocked.incomplete, true);
+  assert.deepEqual(blocked.items, []);
+  assert.deepEqual(blocked.followUp, {
+    activity: "stale",
+    lookup: "failed",
+    error: { httpStatus: 400, code: "INVALID_FIELD", field: "WhatId" },
+    taskFieldsMissingFromDescribe: ["WhatId"]
+  });
+  assert.doesNotMatch(JSON.stringify(blocked.followUp), /Private text/);
+  const empty = await recommendations(
+    fixture({ deniedField: "WhatId" }).service,
+    snapshot("stale"),
+    opportunityId
+  );
+  assert.deepEqual(empty.followUp, { activity: "stale", lookup: "empty" });
+  assert.deepEqual(
+    empty.items.map((item) => item.kind),
+    ["task"]
+  );
+  assert.match(empty.items[0].unavailable ?? "", /permissions/);
 });
 
 test("validation rejects invalid calendar dates, stale dates, unsafe IDs, and missing previous close date", () => {

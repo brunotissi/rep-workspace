@@ -32,6 +32,10 @@ export function accountDisplayName(name: string) {
   );
 }
 
+export function healthStatus(health: Row["health"]) {
+  return health && !health.unassessed ? health.status : undefined;
+}
+
 function filterChecks(filters: typeof emptyFilters) {
   const { search, stage, health, from, through, minimum, maximum } = filters;
   const term = search.trim().toLowerCase();
@@ -50,7 +54,7 @@ function filterChecks(filters: typeof emptyFilters) {
   if (health)
     checks.push({
       label: "health",
-      matches: (row) => (row.health?.status ?? "Unavailable") === health
+      matches: (row) => (healthStatus(row.health) ?? "Unavailable") === health
     });
   if (from || through)
     checks.push({
@@ -107,10 +111,11 @@ export function selectRows(
   sort: { key: SortKey; ascending: boolean }
 ) {
   const checks = filterChecks(filters);
-  const value = (row: Row) =>
-    sort.key === "health"
-      ? row.health && healthOrder[row.health.status]
-      : row[sort.key];
+  const value = (row: Row) => {
+    if (sort.key !== "health") return row[sort.key];
+    const status = healthStatus(row.health);
+    return status && healthOrder[status];
+  };
   return rows
     .filter((row) => checks.every((check) => check.matches(row)))
     .sort((left, right) => {

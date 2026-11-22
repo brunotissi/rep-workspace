@@ -56,6 +56,12 @@ export function NextActions({
       {actions.pendingTask && (
         <p>An open workspace follow-up already exists on this account.</p>
       )}
+      {"followUp" in actions && actions.followUp?.lookup === "failed" && (
+        <p role="status">
+          The app could not check for an existing follow-up Task. The follow-up
+          recommendation is unavailable.
+        </p>
+      )}
       {actions.incomplete && (
         <p>
           Some Salesforce information is unavailable. Suggestions use the data

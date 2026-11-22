@@ -18,7 +18,7 @@
     "start": "node --env-file-if-exists=.env --import tsx server/start.ts",
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit",
-    "test:workspace": "node --import tsx --test tests/workspace.test.ts tests/actions.test.ts tests/action-route.test.ts tests/notifications.test.ts"
+    "test:workspace": "node --import tsx --test tests/workspace.test.ts tests/actions.test.ts tests/action-route.test.ts tests/notifications.test.ts tests/session.test.ts"
   },
   "devDependencies": {
     "@lwc/eslint-plugin-lwc": "^3.1.0",

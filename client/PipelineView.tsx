@@ -4,6 +4,7 @@ import {
   emptyFilters,
   excludingFilters,
   healthLabels,
+  healthStatus,
   pipelinePage,
   selectRows,
   type PipelineData,
@@ -26,11 +27,14 @@ export function amountText({
   );
 }
 export function HealthBadge({ health }: { health?: Health }) {
+  const status = healthStatus(health);
   return (
     <div>
-      <span className={"badge " + (health?.status.toLowerCase() ?? "unknown")}>
+      <span className={"badge " + (status?.toLowerCase() ?? "unknown")}>
         <span className="health-dot" aria-hidden="true" />
-        {healthLabels[health?.status ?? "Unavailable"]}
+        {health?.unassessed
+          ? "Not assessed"
+          : healthLabels[status ?? "Unavailable"]}
       </span>
       {health?.incomplete && <small>Incomplete data</small>}
     </div>
@@ -77,8 +81,17 @@ export function Pipeline({
     [data.rows]
   );
   const rows = useMemo(
-    () => selectRows(data.rows, filters, sort),
-    [data.rows, filters, sort]
+    () =>
+      selectRows(
+        data.rows,
+        data.amountAvailable
+          ? filters
+          : { ...filters, minimum: "", maximum: "" },
+        !data.amountAvailable && sort.key === "Amount"
+          ? { key: "CloseDate", ascending: true }
+          : sort
+      ),
+    [data.rows, data.amountAvailable, filters, sort]
   );
   const followId = follow?.id === selected ? follow?.id : undefined;
   const { page, pages, visible, selectedIndex } = pipelinePage(
@@ -91,7 +104,12 @@ export function Pipeline({
       ? data.rows.find((row) => row.Id === followId)
       : undefined;
   const hiddenBy = filteredSelection
-    ? excludingFilters(filteredSelection, filters)
+    ? excludingFilters(
+        filteredSelection,
+        data.amountAvailable
+          ? filters
+          : { ...filters, minimum: "", maximum: "" }
+      )
     : [];
   useEffect(() => {
     const region = tableRegion.current;
@@ -192,8 +210,14 @@ export function Pipeline({
         ])}
         {inputFilter("from", "Close from", "date")}
         {inputFilter("through", "Close through", "date")}
-        {inputFilter("minimum", "Min amount", "number")}
-        {inputFilter("maximum", "Max amount", "number")}
+        {data.amountAvailable ? (
+          <>
+            {inputFilter("minimum", "Min amount", "number")}
+            {inputFilter("maximum", "Max amount", "number")}
+          </>
+        ) : (
+          <p>Amount filters are unavailable with your Salesforce access.</p>
+        )}
         <button
           className="quiet"
           onClick={() => {
@@ -247,6 +271,7 @@ export function Pipeline({
                       key={column.key}
                       scope="col"
                       aria-sort={
+                        (data.amountAvailable || column.key !== "Amount") &&
                         sort.key === column.key
                           ? sort.ascending
                             ? "ascending"
@@ -254,27 +279,31 @@ export function Pipeline({
                           : undefined
                       }
                     >
-                      <button
-                        className="sort"
-                        onClick={() => {
-                          onLeaveFollow();
-                          setSort({
-                            key: column.key,
-                            ascending:
-                              sort.key !== column.key || !sort.ascending
-                          });
-                          setPage(0);
-                        }}
-                      >
-                        {column.label}{" "}
-                        <span aria-hidden="true">
-                          {sort.key === column.key
-                            ? sort.ascending
-                              ? "↑"
-                              : "↓"
-                            : "↕"}
-                        </span>
-                      </button>
+                      {column.key === "Amount" && !data.amountAvailable ? (
+                        column.label
+                      ) : (
+                        <button
+                          className="sort"
+                          onClick={() => {
+                            onLeaveFollow();
+                            setSort({
+                              key: column.key,
+                              ascending:
+                                sort.key !== column.key || !sort.ascending
+                            });
+                            setPage(0);
+                          }}
+                        >
+                          {column.label}{" "}
+                          <span aria-hidden="true">
+                            {sort.key === column.key
+                              ? sort.ascending
+                                ? "↑"
+                                : "↓"
+                              : "↕"}
+                          </span>
+                        </button>
+                      )}
                     </th>
                   ))}
                 </tr>
@@ -331,8 +360,11 @@ export function Pipeline({
           <nav className="pagination" aria-label="Pipeline pages">
             <button
               className="quiet"
-              disabled={page === 0}
-              onClick={() => changePage(page - 1)}
+              aria-disabled={page === 0}
+              aria-label="Previous pipeline page"
+              onClick={() => {
+                if (page > 0) changePage(page - 1);
+              }}
             >
               Previous
             </button>
@@ -341,8 +373,11 @@ export function Pipeline({
             </span>
             <button
               className="quiet"
-              disabled={page + 1 >= pages}
-              onClick={() => changePage(page + 1)}
+              aria-disabled={page + 1 >= pages}
+              aria-label="Next pipeline page"
+              onClick={() => {
+                if (page + 1 < pages) changePage(page + 1);
+              }}
             >
               Next
             </button>

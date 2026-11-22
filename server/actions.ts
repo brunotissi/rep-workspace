@@ -137,10 +137,30 @@ export async function recommendations(
   if (!opportunity) return { items: [], incomplete: true, pendingTask: false };
   const activity =
     "data" in snapshot.health ? snapshot.health.data.activity : undefined;
-  const pendingTask =
-    activity === "stale" || activity === "none"
-      ? await optional(existingTask(service, snapshot.account.Id))
-      : undefined;
+  let pendingTask: boolean | undefined;
+  let lookupFailure:
+    | {
+        error?: WorkspaceError["readDiagnostic"];
+        taskFieldsMissingFromDescribe?: string[];
+      }
+    | undefined;
+  if (activity === "stale" || activity === "none") {
+    try {
+      pendingTask = await existingTask(service, snapshot.account.Id);
+    } catch (error) {
+      if (error instanceof WorkspaceError && error.status === 401) throw error;
+      const describe = await optional(service.describe("Task"));
+      lookupFailure = {
+        error:
+          error instanceof WorkspaceError ? error.readDiagnostic : undefined,
+        taskFieldsMissingFromDescribe: describe
+          ? ["Id", "WhatId", "IsClosed", "Subject"].filter(
+              (name) => !describe.fields.some((field) => field.name === name)
+            )
+          : undefined
+      };
+    }
+  }
   const candidates = recommend({
     closeDate: opportunity.CloseDate,
     today: snapshot.today,
@@ -222,6 +242,17 @@ export async function recommendations(
   return {
     items,
     pendingTask: pendingTask === true,
+    followUp: {
+      activity: activity ?? "unknown",
+      lookup: lookupFailure
+        ? ("failed" as const)
+        : pendingTask === true
+          ? ("found" as const)
+          : pendingTask === false
+            ? ("empty" as const)
+            : ("skipped" as const),
+      ...lookupFailure
+    },
     incomplete:
       !opportunity.CloseDate ||
       activity === undefined ||
@@ -261,25 +292,12 @@ export async function performAction(
     if (kind === "closeDate")
       await requirePermission("Opportunity", "updateable", ["CloseDate"]);
 
-    const [opportunity] = await service.query<{
-      Id: string;
-      CloseDate?: string;
-    }>(
-      "SELECT Id" +
-        (kind === "closeDate" ? ", CloseDate" : "") +
-        " FROM Opportunity WHERE Id = '" +
-        opportunityId +
-        "' AND AccountId = '" +
-        accountId +
-        "' AND OwnerId = '" +
-        userId +
-        "' AND IsClosed = false LIMIT 1"
+    const opportunity = await service.requireOpenOpportunity(
+      userId,
+      accountId,
+      opportunityId,
+      kind === "closeDate"
     );
-    if (!opportunity)
-      throw new WorkspaceError(
-        404,
-        "The selected open opportunity is no longer available in your pipeline."
-      );
 
     if (kind === "closeDate") {
       if (opportunity.CloseDate === action.date)

@@ -19,7 +19,12 @@ function ListSection<T>({
       {"error" in result ? (
         <p role="status">{result.error}</p>
       ) : result.data.length ? (
-        <ul>{result.data.map(render)}</ul>
+        <ul
+          tabIndex={result.data.length > 4 ? 0 : undefined}
+          aria-label={title}
+        >
+          {result.data.map(render)}
+        </ul>
       ) : (
         <p>{empty}</p>
       )}
@@ -52,10 +57,6 @@ export function Snapshot({ data }: { data: SnapshotData }) {
         left.Id.localeCompare(right.Id)
     )
     .slice(0, 10);
-  const unavailable = [
-    ...("error" in tasks ? ["Tasks"] : []),
-    ...("error" in events ? ["Events"] : [])
-  ];
   const decisionMakerIds = new Set(data.decisionMakerIds);
   const keyContacts =
     "data" in contacts
@@ -124,11 +125,19 @@ export function Snapshot({ data }: { data: SnapshotData }) {
       />
       <section className="snapshot-section">
         <h3>Recent activity</h3>
-        {unavailable.length > 0 && (
-          <p role="status">{unavailable.join(" and ")} could not be loaded.</p>
+        {"error" in tasks && <p role="status">Tasks: {tasks.error}</p>}
+        {"error" in events && <p role="status">Events: {events.error}</p>}
+        {"data" in tasks && tasks.datesUnavailable && (
+          <p>
+            Task dates are unavailable. Visible completed Tasks are shown
+            without dates.
+          </p>
         )}
         {timeline.length ? (
-          <ul>
+          <ul
+            tabIndex={timeline.length > 4 ? 0 : undefined}
+            aria-label="Recent activity"
+          >
             {timeline.map((item) => (
               <li key={item.Id}>
                 <strong>{item.Subject ?? "Subject unavailable"}</strong>
@@ -139,7 +148,8 @@ export function Snapshot({ data }: { data: SnapshotData }) {
             ))}
           </ul>
         ) : (
-          unavailable.length === 0 && <p>No recent activity is visible.</p>
+          "data" in tasks &&
+          "data" in events && <p>No recent activity is visible.</p>
         )}
       </section>
     </>
