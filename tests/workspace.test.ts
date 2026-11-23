@@ -8,14 +8,31 @@ import { accountHealth } from "../server/health";
 import { workspace, WorkspaceError, recordId } from "../server/workspace";
 import {
   accountDisplayName,
+  activeDimensions,
   emptyFilters,
   excludingFilters,
+  healthCounts,
   pipelinePage,
   selectRows,
   type Row
 } from "../client/pipeline";
 import { amountText, HealthBadge, Pipeline } from "../client/PipelineView";
 import { Snapshot } from "../client/Snapshot";
+import { WorkspaceSidebar } from "../client/WorkspaceSidebar";
+import { OpportunityContext } from "../client/OpportunityContext";
+import { SelectionPlaceholder } from "../client/SelectionPlaceholder";
+
+test("initial Pipeline loading and failure never show the empty-selection prompt", () => {
+  const render = (loading: boolean, hasPipeline: boolean) =>
+    renderToStaticMarkup(
+      createElement(SelectionPlaceholder, { loading, hasPipeline })
+    );
+  const loading = render(true, false);
+  assert.match(loading, /selection-skeleton/);
+  assert.doesNotMatch(loading, /Select an opportunity/);
+  assert.equal(render(false, false), "");
+  assert.match(render(false, true), /Select an opportunity/);
+});
 
 const today = "2026-11-21";
 const accountId = "001000000000001AAA";
@@ -28,6 +45,111 @@ const healthy = {
   decisionMaker: true
 };
 const json = (records: unknown[]) => Response.json({ records, done: true });
+
+test("Snapshot uses readable contact titles and distinguishes selected, other, and unknown role scope", async () => {
+  const chosen = "006000000000001AAA";
+  const other = "006000000000002AAA";
+  const contacts = [
+    {
+      Id: "003000000000001AAA",
+      Name: "Visible contact A",
+      Title: "Budget owner"
+    },
+    {
+      Id: "003000000000002AAA",
+      Name: "Visible contact B",
+      Title: "Operations lead"
+    }
+  ];
+  for (const [titleReadable, rolesReadable] of [
+    [true, true],
+    [false, false]
+  ]) {
+    const service = workspace(async (path) => {
+      if (path.endsWith("/describe"))
+        return Response.json({
+          queryable: true,
+          fields:
+            path.includes("/Contact/") && titleReadable
+              ? [{ name: "Title" }]
+              : []
+        });
+      const soql = new URL(path, "https://example.com").searchParams.get("q")!;
+      if (soql.includes("FROM Account"))
+        return json([{ Id: accountId, Name: "Demo account" }]);
+      if (soql.includes("FROM Contact WHERE")) {
+        assert.ok(soql.includes(", Title") === titleReadable);
+        assert.ok(soql.includes(accountId));
+        return json(
+          titleReadable
+            ? contacts
+            : contacts.map(({ Id, Name }) => ({ Id, Name }))
+        );
+      }
+      if (soql.startsWith("SELECT ContactId, OpportunityId")) {
+        assert.match(soql, /Opportunity\.IsClosed = false/);
+        if (!rolesReadable)
+          return Response.json([{ errorCode: "INVALID_FIELD" }], {
+            status: 400
+          });
+        return json([
+          { ContactId: contacts[0].Id, OpportunityId: chosen },
+          { ContactId: contacts[0].Id, OpportunityId: other },
+          { ContactId: contacts[1].Id, OpportunityId: other }
+        ]);
+      }
+      return json([]);
+    }, new Map());
+    const snapshot = await service.snapshot(accountId, today, chosen);
+    const html = renderToStaticMarkup(
+      createElement(Snapshot, { data: snapshot })
+    );
+    if (rolesReadable) {
+      assert.deepEqual(snapshot.selectedDecisionMakerIds, [contacts[0].Id]);
+      assert.deepEqual(
+        snapshot.decisionMakerIds,
+        contacts.map(({ Id }) => Id)
+      );
+      assert.match(
+        html,
+        /Visible contact A<\/strong><span[^>]*>Decision maker · This opportunity<\/span>/
+      );
+      assert.match(
+        html,
+        /Visible contact B<\/strong><span[^>]*>Decision maker · Other opportunity<\/span>/
+      );
+      assert.match(html, /Budget owner/);
+      assert.match(html, /Operations lead/);
+      // A server started before the new per-contact field still returns the
+      // account-wide IDs and the selected-opportunity yes/no flag.
+      const legacy = JSON.parse(
+        JSON.stringify({
+          ...snapshot,
+          selectedDecisionMakerIds: undefined,
+          decisionMakerIds: [contacts[0].Id],
+          selectedDecisionMaker: false
+        })
+      ) as typeof snapshot;
+      const renderLegacy = (selectedDecisionMaker: boolean | undefined) =>
+        renderToStaticMarkup(
+          createElement(Snapshot, {
+            data: { ...legacy, selectedDecisionMaker }
+          })
+        );
+      assert.match(
+        renderLegacy(false),
+        /Visible contact A<\/strong><span[^>]*>Decision maker · Other opportunity<\/span>/
+      );
+      assert.doesNotMatch(renderLegacy(true), /contact-role/);
+      assert.doesNotMatch(renderLegacy(undefined), /contact-role/);
+    } else {
+      assert.equal(snapshot.selectedDecisionMakerIds, undefined);
+      assert.equal(snapshot.selectedDecisionMaker, undefined);
+      assert.doesNotMatch(html, /contact-role|Budget owner|Operations lead/);
+      assert.match(html, /Visible contact A/);
+    }
+  }
+});
 
 test("missing Task due-date access preserves the readable task and does not manufacture stale activity", async () => {
   const service = workspace(async (path) => {
@@ -521,7 +643,10 @@ test("confirmed close-date saves follow the selected row across pages and respec
     })
   );
   assert.match(html, /class="selected"/);
-  assert.match(html, /aria-pressed="true">Field expansion/);
+  assert.match(
+    html,
+    /aria-pressed="true" title="Field expansion">Field expansion/
+  );
   assert.match(html, /Page 3 of 3/);
   assert.match(html, /aria-disabled="true" aria-label="Next pipeline page"/);
   assert.match(
@@ -628,5 +753,242 @@ test("unreadable Amount is labeled without exposing filter or sort controls", ()
   );
   assert.match(html, /Amount filters are unavailable/);
   assert.doesNotMatch(html, /Min amount|Max amount|class="sort">Amount/);
-  assert.match(html, /<td>Unavailable<\/td>/);
+  assert.match(
+    html,
+    /<td><span class="cell-text" title="Unavailable">Unavailable<\/span><\/td>/
+  );
+});
+
+test("quick health counts use all matching rows before health and pagination", () => {
+  const green = { status: "Green", incomplete: false, reasons: [] } as const;
+  const row = {
+    ...sampleOpportunity,
+    Name: "Renewal",
+    StageName: "Negotiation",
+    CloseDate: today,
+    Amount: 100
+  };
+  const rows: Row[] = [
+    ...Array.from({ length: 51 }, (_, index) => ({
+      ...row,
+      Id: String(index),
+      health: { ...green, reasons: [] }
+    })),
+    {
+      ...row,
+      Id: "unassessed",
+      health: {
+        status: "Amber",
+        unassessed: true,
+        incomplete: true,
+        reasons: []
+      }
+    },
+    { ...row, Id: "missing", health: undefined },
+    { ...row, Id: "different-stage", StageName: "Prospecting" },
+    { ...row, Id: "different-name", Name: "Expansion" },
+    { ...row, Id: "different-date", CloseDate: "2026-11-22" },
+    { ...row, Id: "different-amount", Amount: 99 }
+  ];
+  const filters = {
+    ...emptyFilters,
+    search: "  ReNeWAL ",
+    stage: "Negotiation",
+    from: today,
+    through: today,
+    minimum: "100",
+    maximum: "100",
+    health: "Unavailable"
+  };
+  assert.deepEqual(healthCounts(rows, filters), {
+    All: 53,
+    Green: 51,
+    Amber: 0,
+    Red: 0
+  });
+  assert.deepEqual(
+    selectRows(rows, filters, { key: "CloseDate", ascending: true }).map(
+      ({ Id }) => Id
+    ),
+    ["missing", "unassessed"]
+  );
+  assert.deepEqual(
+    activeDimensions(filters).map(({ label, keys }) => [label, keys]),
+    [
+      ["Stage", ["stage"]],
+      ["Close date", ["from", "through"]],
+      ["Amount", ["minimum", "maximum"]],
+      ["Health", ["health"]]
+    ]
+  );
+  assert.deepEqual(
+    activeDimensions({ ...emptyFilters, search: "Renewal" }),
+    []
+  );
+});
+
+test("workspace controls start collapsed and preserve restricted table semantics", () => {
+  const sidebar = renderToStaticMarkup(
+    createElement(WorkspaceSidebar, {
+      username: "rep.workspace@example.com",
+      signingOut: false,
+      signOut: () => {}
+    })
+  );
+  assert.match(sidebar, /aria-expanded="false".*aria-label="Expand sidebar"/);
+  assert.match(
+    sidebar,
+    /class="sidebar-header".*class="sidebar-toggle".*<\/div><nav/
+  );
+  assert.match(sidebar, /id="workspace-user" hidden/);
+  const markup = renderToStaticMarkup(
+    createElement(Pipeline, {
+      data: {
+        today,
+        amountAvailable: false,
+        rows: [sampleOpportunity],
+        accountWarning: undefined
+      },
+      onSelect: () => {},
+      onFollow: () => {},
+      onLeaveFollow: () => {}
+    })
+  );
+  assert.match(
+    markup,
+    /aria-expanded="false" aria-controls="advanced-filters"/
+  );
+  assert.match(markup, /id="advanced-filters" hidden/);
+  assert.match(markup, /Amount filters are unavailable/);
+  assert.match(markup, /<th scope="col">Amount<\/th>/);
+  assert.match(markup, /<button class="sort">Account /);
+  assert.match(markup, /<button class="sort">Opportunity /);
+  assert.doesNotMatch(markup, /Rows per page|Min amount|Filters \(4\)/);
+});
+
+test("selectable rows retain one native selection button and context uses the selected row", () => {
+  const first = { ...sampleOpportunity, Name: "Selected renewal" };
+  const second = { ...first, Id: "second", Name: "Another renewal" };
+  const unavailable = {
+    ...first,
+    Id: "missing",
+    Name: "Without Account",
+    accountName: undefined
+  };
+  const html = renderToStaticMarkup(
+    createElement(Pipeline, {
+      data: {
+        today,
+        amountAvailable: true,
+        rows: [first, second, unavailable],
+        accountWarning: undefined
+      },
+      selected: second.Id,
+      onSelect: () => {},
+      onFollow: () => {},
+      onLeaveFollow: () => {}
+    })
+  );
+  assert.equal((html.match(/data-selectable="true"/g) ?? []).length, 2);
+  assert.match(
+    html,
+    /<tr class="selected" data-selectable="true"><th scope="row"><button type="button" class="opportunity" aria-pressed="true" aria-describedby="close-date-overdue-second" title="Another renewal">Another renewal/
+  );
+  assert.doesNotMatch(html, /<tr[^>]*(?:tabindex|role=)/);
+  const context = renderToStaticMarkup(
+    createElement(OpportunityContext, {
+      row: {
+        ...second,
+        StageName: "Id. Decision Makers",
+        Amount: undefined,
+        health: undefined
+      },
+      onReturn: () => {}
+    })
+  );
+  assert.match(
+    context,
+    /<h2 id="selected-title" tabindex="-1">Another renewal/
+  );
+  assert.match(context, /<dd>Id\. Decision Makers<\/dd>/);
+  assert.doesNotMatch(context, /Account health|context-health/);
+  assert.match(context, /<dd>Unavailable<\/dd>/);
+});
+
+test("pipeline keeps a machine-readable date and labeled inline overdue warning", () => {
+  const html = renderToStaticMarkup(
+    createElement(Pipeline, {
+      data: {
+        today,
+        amountAvailable: true,
+        rows: [
+          sampleOpportunity,
+          { ...sampleOpportunity, Id: "upcoming", CloseDate: "2026-12-05" }
+        ],
+        accountWarning: undefined
+      },
+      onSelect: () => {},
+      onFollow: () => {},
+      onLeaveFollow: () => {}
+    })
+  );
+  assert.match(
+    html,
+    /<div class="table-close-date is-overdue" title="Overdue — close date has passed"><time dateTime="2026-11-16">[^<]+<\/time>/
+  );
+  assert.match(html, /aria-describedby="close-date-overdue-[^"]+"/);
+  assert.match(
+    html,
+    /class="visually-hidden">Overdue — close date has passed<\/span>/
+  );
+  assert.match(html, /<time dateTime="2026-12-05"[^>]*>[^<]+<\/time><\/div>/);
+});
+
+test("search matches every normalized token across Opportunity and Account names", () => {
+  const matching = {
+    ...sampleOpportunity,
+    Name: "Pioneer Packaging - Renewal 19",
+    accountName: "RW Demo 01234567-89AB-cdef-0123-456789abcdef | Café Group"
+  };
+  const sibling = {
+    ...matching,
+    Id: "2",
+    Name: "Pioneer Packaging - Expansion"
+  };
+  for (const search of [
+    "Pioneer Renewal",
+    " renewal\t PÍONEER ",
+    "cafe renewal"
+  ]) {
+    assert.deepEqual(
+      selectRows([sibling, matching], { ...emptyFilters, search }, closeSort),
+      [matching]
+    );
+  }
+  for (const search of ["Pioneer missing", "RW Demo Renewal"]) {
+    assert.deepEqual(
+      selectRows([matching], { ...emptyFilters, search }, closeSort),
+      []
+    );
+  }
+});
+
+test("Opportunity and displayed Account sort in both directions with stable ties and missing accounts last", () => {
+  const rows = [
+    { ...sampleOpportunity, Id: "3", Name: "Zulu", accountName: "Alder" },
+    { ...sampleOpportunity, Id: "2", Name: "Alpha", accountName: "Beryl" },
+    {
+      ...sampleOpportunity,
+      Id: "1",
+      Name: "Alpha",
+      accountName: "RW Demo 01234567-89AB-cdef-0123-456789abcdef | Alder"
+    },
+    { ...sampleOpportunity, Id: "4", Name: "Beta", accountName: undefined }
+  ];
+  const order = (key: "Name" | "accountName", ascending: boolean) =>
+    selectRows(rows, emptyFilters, { key, ascending }).map((row) => row.Id);
+  assert.deepEqual(order("Name", true), ["1", "2", "4", "3"]);
+  assert.deepEqual(order("Name", false), ["3", "4", "1", "2"]);
+  assert.deepEqual(order("accountName", true), ["1", "3", "2", "4"]);
+  assert.deepEqual(order("accountName", false), ["2", "1", "3", "4"]);
 });

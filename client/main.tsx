@@ -12,7 +12,11 @@ import { NextActions, type ActionRecommendations } from "./NextActions";
 import { runAction, withCloseDate } from "./actions";
 import type { ActionInput } from "../server/actions";
 import { createNotifications, type Toast } from "./notifications";
+import { SelectionPlaceholder } from "./SelectionPlaceholder";
 import { ToastRegion } from "./ToastRegion";
+import { WorkspaceSidebar } from "./WorkspaceSidebar";
+import { OpportunityContext } from "./OpportunityContext";
+import { WorkspaceIcon } from "./WorkspaceIcon";
 import "./style.css";
 
 type CloseDateAction = Extract<ActionInput, { kind: "closeDate" }>;
@@ -31,6 +35,7 @@ function snapshotWithDate<T extends SnapshotData>(
 function Workspace() {
   const pipeline = useRead<PipelineData>("/api/pipeline");
   const [selected, setSelected] = useState<string>();
+  const [selectionUnavailable, setSelectionUnavailable] = useState(false);
   const [follow, setFollow] = useState<{ id: string }>();
   const [pending, setPending] = useState<ActionInput["kind"]>();
   const busy = useRef(false);
@@ -44,7 +49,7 @@ function Workspace() {
   const [expired, setExpired] = useState(false);
   const active = selected
     ? pipeline.data?.rows.find((row) => row.Id === selected)
-    : pipeline.data?.rows.find((row) => row.AccountId && row.accountName);
+    : undefined;
   const selectionKey = active?.AccountId
     ? active.AccountId + ":" + active.Id
     : undefined;
@@ -58,6 +63,26 @@ function Workspace() {
       ? "/api/accounts/" + active.AccountId + "?opportunity=" + active.Id
       : undefined
   );
+  useLayoutEffect(() => {
+    const confirmedUnavailable =
+      pipeline.data &&
+      !pipeline.loading &&
+      !pipeline.error &&
+      (!active?.AccountId ||
+        (!active.accountName && !pipeline.data.accountWarning));
+    if (selected && (confirmedUnavailable || account.error?.status === 404)) {
+      setSelected(undefined);
+      setFollow(undefined);
+      setSelectionUnavailable(true);
+    }
+  }, [
+    selected,
+    active,
+    pipeline.data,
+    pipeline.loading,
+    pipeline.error,
+    account.error
+  ]);
   if (
     expired ||
     pipeline.error?.status === 401 ||
@@ -74,6 +99,20 @@ function Workspace() {
     );
   }
 
+  function focusSection(target: HTMLElement | null) {
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  function returnToPipeline() {
+    focusSection(
+      document.querySelector<HTMLButtonElement>(
+        ".table-scroll button[aria-pressed='true']"
+      ) ??
+        document.getElementById("pipeline-search") ??
+        document.getElementById("pipeline-title")
+    );
+  }
   const blocked = Boolean(
     account.loading || account.error || pipeline.loading || pipeline.error
   );
@@ -136,17 +175,23 @@ function Workspace() {
   return (
     <>
       <div className="workspace">
-        <section className="panel pipeline" aria-labelledby="pipeline-title">
-          <div className="panel-header">
-            <h2 id="pipeline-title">My pipeline</h2>
-            <p>Open opportunities across your accounts</p>
-          </div>
+        <section className="pipeline" aria-labelledby="pipeline-title">
+          <h2 id="pipeline-title" className="visually-hidden" tabIndex={-1}>
+            My pipeline
+          </h2>
           {pipeline.loading && (
             <p className="notice" role="status">
               {pipeline.data
                 ? "Refreshing your opportunities..."
                 : "Loading your opportunities..."}
             </p>
+          )}
+          {pipeline.loading && !pipeline.data && (
+            <div className="panel pipeline-skeleton" aria-hidden="true">
+              {Array.from({ length: 6 }, (_, index) => (
+                <span key={index} />
+              ))}
+            </div>
           )}
           {pipeline.error && (
             <ReadError retry={pipeline.retry}>
@@ -168,25 +213,50 @@ function Workspace() {
                   row.AccountId ? row.AccountId + ":" + row.Id : undefined
                 );
                 setSelected(row.Id);
+                setSelectionUnavailable(false);
               }}
               follow={follow}
               onFollow={(id) => setFollow({ id })}
               onLeaveFollow={() => setFollow(undefined)}
               preview={preview}
+              onDetails={
+                active
+                  ? () =>
+                      focusSection(document.getElementById("selected-title"))
+                  : undefined
+              }
             />
           )}
         </section>
-        <aside className="panel snapshot" aria-labelledby="snapshot-title">
-          <div className="panel-header">
-            <h2 id="snapshot-title">Account snapshot</h2>
-            {active && <p>Selected opportunity: {active.Name}</p>}
-          </div>
+        <section
+          className="detail-pane"
+          aria-label="Selected opportunity details"
+        >
+          {active && (
+            <OpportunityContext
+              row={active}
+              onActions={
+                account.data?.actions
+                  ? () =>
+                      focusSection(
+                        document.getElementById("next-actions-title")
+                      )
+                  : undefined
+              }
+              date={
+                preview && preview.opportunityId === active.Id
+                  ? preview.date
+                  : undefined
+              }
+              onReturn={returnToPipeline}
+            />
+          )}
           {!active && (
-            <p className="notice">
-              {selected && pipeline.data
-                ? "The selected opportunity is no longer available in your open pipeline."
-                : "Select an opportunity to view its account."}
-            </p>
+            <SelectionPlaceholder
+              loading={pipeline.loading}
+              hasPipeline={Boolean(pipeline.data)}
+              unavailable={selectionUnavailable}
+            />
           )}
           {account.loading && (
             <p className="notice" role="status">
@@ -209,7 +279,18 @@ function Workspace() {
             </p>
           )}
           {account.data && active && (
-            <>
+            <div className="detail-grid">
+              <section
+                className="panel snapshot"
+                aria-labelledby="snapshot-title"
+              >
+                <div className="panel-header">
+                  <h2 id="snapshot-title">
+                    <WorkspaceIcon name="account" /> Account Snapshot
+                  </h2>
+                </div>
+                <Snapshot data={snapshotWithDate(account.data, preview)} />
+              </section>
               <NextActions
                 key={active.Id}
                 snapshot={account.data}
@@ -224,10 +305,9 @@ function Workspace() {
                 }
                 onAction={save}
               />
-              <Snapshot data={snapshotWithDate(account.data, preview)} />
-            </>
+            </div>
           )}
-        </aside>
+        </section>
       </div>
       <ToastRegion toast={toast} notifications={notifications} />
     </>
@@ -265,47 +345,38 @@ function App() {
       <a className="skip-link" href="#main-content">
         Skip to workspace
       </a>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            RW
-          </span>
-          <h1>Rep Workspace</h1>
-        </div>
-        {session.data && (
-          <div className="user">
-            <span>{session.data.username}</span>
-            <button className="quiet" onClick={signOut} disabled={signingOut}>
-              Sign out
-            </button>
-          </div>
-        )}
-      </header>
-      <main id="main-content" tabIndex={-1}>
-        {logoutError && <ReadError>Could not sign out. Try again.</ReadError>}
-        {session.loading && (
-          <p className="notice" role="status">
-            Checking Salesforce session…
-          </p>
-        )}
-        {session.error && session.error.status !== 401 && (
-          <ReadError retry={session.retry}>{session.error.message}</ReadError>
-        )}
-        {session.error?.status === 401 && (
-          <section className="panel welcome">
-            <h2>Connect to Salesforce</h2>
-            <p>Sign in to see your pipeline and account context.</p>
-            {oauthError && (
-              <ReadError>
-                Salesforce sign-in did not complete. Check the app settings and
-                try again.
-              </ReadError>
-            )}
-            <SignIn />
-          </section>
-        )}
-        {session.data && <Workspace />}
-      </main>
+      <div className="workspace-shell">
+        <WorkspaceSidebar
+          username={session.data?.username}
+          signingOut={signingOut}
+          signOut={signOut}
+        />
+        <main id="main-content" tabIndex={-1}>
+          {logoutError && <ReadError>Could not sign out. Try again.</ReadError>}
+          {session.loading && (
+            <p className="notice" role="status">
+              Checking Salesforce session…
+            </p>
+          )}
+          {session.error && session.error.status !== 401 && (
+            <ReadError retry={session.retry}>{session.error.message}</ReadError>
+          )}
+          {session.error?.status === 401 && (
+            <section className="panel welcome">
+              <h2>Connect to Salesforce</h2>
+              <p>Sign in to see your pipeline and account context.</p>
+              {oauthError && (
+                <ReadError>
+                  Salesforce sign-in did not complete. Check the app settings
+                  and try again.
+                </ReadError>
+              )}
+              <SignIn />
+            </section>
+          )}
+          {session.data && <Workspace />}
+        </main>
+      </div>
     </>
   );
 }

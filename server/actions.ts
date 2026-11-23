@@ -51,7 +51,7 @@ export function recommend(evidence: {
     results.push({
       kind: "contactRole",
       title: "Identify a decision maker",
-      reason: "The selected opportunity has no visible decision-maker role."
+      reason: "This opportunity has no visible Decision Maker contact role."
     });
   return results;
 }

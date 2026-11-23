@@ -573,6 +573,19 @@ export function workspace(
               (role) => role.OpportunityId === selectedOpportunityId
             )
           : undefined,
+      selectedDecisionMakerIds:
+        selectedOpportunityId && "data" in roles
+          ? [
+              ...new Set(
+                roles.data
+                  .filter(
+                    (role) => role.OpportunityId === selectedOpportunityId
+                  )
+                  .map((role) => role.ContactId)
+                  .filter(recordId)
+              )
+            ]
+          : undefined,
       decisionMakerIds:
         "data" in roles
           ? [

@@ -1,3 +1,4 @@
+import { WorkspaceIcon } from "./WorkspaceIcon";
 import type { Toast, createNotifications } from "./notifications";
 
 export function ToastRegion({
@@ -20,9 +21,16 @@ export function ToastRegion({
       </div>
       {toast && (
         <div className={"toast toast-" + toast.kind}>
-          <div>
-            <p className="toast-message">{toast.message}</p>
-            {toast.context && <p className="toast-context">{toast.context}</p>}
+          <div className="toast-content">
+            <WorkspaceIcon
+              name={toast.kind === "success" ? "healthy" : "attention"}
+            />
+            <div>
+              <p className="toast-message">{toast.message}</p>
+              {toast.context && (
+                <p className="toast-context">{toast.context}</p>
+              )}
+            </div>
           </div>
           <button
             className="toast-dismiss"

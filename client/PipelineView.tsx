@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   accountDisplayName,
+  activeDimensions,
+  healthCounts,
+  pageSize,
   emptyFilters,
   excludingFilters,
   healthLabels,
@@ -11,11 +14,28 @@ import {
   type Row,
   type SortKey
 } from "./pipeline";
+import { WorkspaceIcon } from "./WorkspaceIcon";
 import type { Health } from "../server/health";
 
 const amountFormat = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2
 });
+const dateFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeZone: "UTC"
+});
+const tableDateFormat = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: "UTC"
+});
+export function dateText(value?: string, formatter = dateFormat) {
+  const timestamp = value ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp)
+    ? formatter.format(timestamp)
+    : "Unavailable";
+}
 export function amountText({
   Amount,
   formattedAmount
@@ -42,9 +62,11 @@ export function HealthBadge({ health }: { health?: Health }) {
 }
 
 const columns: { key: SortKey; label: string }[] = [
+  { key: "Name", label: "Opportunity" },
+  { key: "accountName", label: "Account" },
   { key: "StageName", label: "Stage" },
-  { key: "CloseDate", label: "Close date" },
   { key: "Amount", label: "Amount" },
+  { key: "CloseDate", label: "Close date" },
   { key: "health", label: "Health" }
 ];
 
@@ -55,7 +77,8 @@ export function Pipeline({
   follow,
   onFollow,
   onLeaveFollow,
-  preview
+  preview,
+  onDetails
 }: {
   data: PipelineData;
   selected?: string;
@@ -64,7 +87,10 @@ export function Pipeline({
   onFollow: (id: string) => void;
   onLeaveFollow: () => void;
   preview?: { opportunityId: string; date: string };
+  onDetails?: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const filtersButton = useRef<HTMLButtonElement>(null);
   const [filters, setFilters] = useState(emptyFilters);
   const [sort, setSort] = useState<{ key: SortKey; ascending: boolean }>({
     key: "CloseDate",
@@ -80,19 +106,24 @@ export function Pipeline({
       ].sort(),
     [data.rows]
   );
-  const rows = useMemo(
+  const effectiveFilters = useMemo(
     () =>
-      selectRows(
-        data.rows,
-        data.amountAvailable
-          ? filters
-          : { ...filters, minimum: "", maximum: "" },
-        !data.amountAvailable && sort.key === "Amount"
-          ? { key: "CloseDate", ascending: true }
-          : sort
-      ),
-    [data.rows, data.amountAvailable, filters, sort]
+      data.amountAvailable ? filters : { ...filters, minimum: "", maximum: "" },
+    [data.amountAvailable, filters]
   );
+  const effectiveSort =
+    !data.amountAvailable && sort.key === "Amount"
+      ? { key: "CloseDate" as const, ascending: true }
+      : sort;
+  const rows = useMemo(
+    () => selectRows(data.rows, effectiveFilters, effectiveSort),
+    [data.rows, effectiveFilters, effectiveSort.key, effectiveSort.ascending]
+  );
+  const counts = useMemo(
+    () => healthCounts(data.rows, effectiveFilters),
+    [data.rows, effectiveFilters]
+  );
+  const dimensions = activeDimensions(effectiveFilters);
   const followId = follow?.id === selected ? follow?.id : undefined;
   const { page, pages, visible, selectedIndex } = pipelinePage(
     rows,
@@ -104,12 +135,7 @@ export function Pipeline({
       ? data.rows.find((row) => row.Id === followId)
       : undefined;
   const hiddenBy = filteredSelection
-    ? excludingFilters(
-        filteredSelection,
-        data.amountAvailable
-          ? filters
-          : { ...filters, minimum: "", maximum: "" }
-      )
+    ? excludingFilters(filteredSelection, effectiveFilters)
     : [];
   useEffect(() => {
     const region = tableRegion.current;
@@ -136,8 +162,10 @@ export function Pipeline({
     onLeaveFollow();
     setFilters((current) => ({ ...current, [key]: value }));
     setPage(0);
+    if (tableRegion.current) tableRegion.current.scrollTop = 0;
   }
-  function changePage(page: number) {
+  function changePage(page: number, resetScroll = true) {
+    if (resetScroll && tableRegion.current) tableRegion.current.scrollTop = 0;
     onLeaveFollow();
     setPage(page);
   }
@@ -191,47 +219,161 @@ export function Pipeline({
 
   return (
     <>
-      <fieldset className="filters">
-        <legend>Filter opportunities</legend>
+      <div
+        className="health-filters"
+        role="group"
+        aria-label="Filter by account health"
+      >
+        {(["All", "Green", "Amber", "Red"] as const).map((status) => {
+          const value = status === "All" ? "" : status;
+          return (
+            <button
+              key={status}
+              type="button"
+              className="health-filter"
+              aria-pressed={filters.health === value}
+              onClick={() => filter("health", value)}
+            >
+              {status !== "All" && (
+                <span
+                  className={`health-dot ${status.toLowerCase()}`}
+                  aria-hidden="true"
+                />
+              )}
+              {status === "All" ? "All opportunities" : healthLabels[status]}
+              <span className="health-count">
+                {counts[status].toLocaleString()}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="pipeline-toolbar">
         <label className="pipeline-search">
-          Search opportunities and accounts
+          <span className="visually-hidden">
+            Search opportunities and accounts
+          </span>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <circle cx="10" cy="10" r="6" />
+            <path d="m15 15 5 5" />
+          </svg>
           <input
+            id="pipeline-search"
             type="search"
+            placeholder="Search opportunities or accounts…"
             value={filters.search}
             onChange={(event) => filter("search", event.target.value)}
           />
         </label>
+        <button
+          className="quiet filter-toggle"
+          type="button"
+          ref={filtersButton}
+          aria-expanded={expanded}
+          aria-controls="advanced-filters"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <path d="M3 5h18l-7 8v5l-4 2v-7z" />
+          </svg>
+          Filters{dimensions.length ? ` (${dimensions.length})` : ""}
+          <WorkspaceIcon name="chevron" className="filter-chevron" />
+        </button>
+      </div>
+      <fieldset
+        className="filters panel"
+        id="advanced-filters"
+        hidden={!expanded}
+      >
+        <legend className="visually-hidden">
+          Advanced opportunity filters
+        </legend>
         {selectFilter("stage", "Stage", stages)}
+        <div className="filter-range">
+          {inputFilter("from", "Close from", "date")}
+          {inputFilter("through", "Close through", "date")}
+        </div>
+        {data.amountAvailable ? (
+          <div className="filter-range">
+            {inputFilter("minimum", "Min amount", "number")}
+            {inputFilter("maximum", "Max amount", "number")}
+          </div>
+        ) : (
+          <p>Amount filters are unavailable with your Salesforce access.</p>
+        )}
         {selectFilter("health", "Health", [
           "Green",
           "Amber",
           "Red",
           "Unavailable"
         ])}
-        {inputFilter("from", "Close from", "date")}
-        {inputFilter("through", "Close through", "date")}
-        {data.amountAvailable ? (
-          <>
-            {inputFilter("minimum", "Min amount", "number")}
-            {inputFilter("maximum", "Max amount", "number")}
-          </>
-        ) : (
-          <p>Amount filters are unavailable with your Salesforce access.</p>
-        )}
-        <button
-          className="quiet"
-          onClick={() => {
-            onLeaveFollow();
-            setFilters(emptyFilters);
-            setPage(0);
-          }}
-        >
-          Clear search and filters
-        </button>
+        <small className="filter-help">Filters apply as you change them.</small>
       </fieldset>
-      <p className="table-summary" role="status">
-        {rows.length} of {data.rows.length} opportunities
-      </p>
+      {(dimensions.length > 0 || filters.search) && (
+        <div
+          className="active-filters"
+          role="group"
+          aria-label="Applied filters"
+        >
+          {dimensions.map(({ label, value, keys }, index) => (
+            <button
+              type="button"
+              className="filter-chip"
+              key={label}
+              aria-label={`Remove ${label} filter: ${value}`}
+              onClick={(event) => {
+                const next =
+                  index < dimensions.length - 1
+                    ? event.currentTarget.nextElementSibling
+                    : filtersButton.current;
+                if (next instanceof HTMLElement) next.focus();
+                onLeaveFollow();
+                setFilters((current) => ({
+                  ...current,
+                  ...Object.fromEntries(keys.map((key) => [key, ""]))
+                }));
+                setPage(0);
+              }}
+            >
+              {label}: {value} <span aria-hidden="true">×</span>
+            </button>
+          ))}
+          <button
+            className="text-control"
+            onClick={() => {
+              filtersButton.current?.focus();
+              onLeaveFollow();
+              setFilters(emptyFilters);
+              setPage(0);
+            }}
+          >
+            Clear filters
+          </button>
+        </div>
+      )}
+      <div className="pipeline-meta">
+        <p className="table-summary" role="status">
+          {rows.length.toLocaleString()} of {data.rows.length.toLocaleString()}{" "}
+          opportunities
+        </p>
+        {onDetails && (
+          <button className="section-skip" onClick={onDetails}>
+            Go to selected details
+          </button>
+        )}
+      </div>
       {filteredSelection && hiddenBy.length > 0 && (
         <div className="notice filtered-selection">
           <p role="status">
@@ -255,133 +397,212 @@ export function Pipeline({
         </p>
       ) : (
         <>
-          <div
-            ref={tableRegion}
-            className="table-scroll"
-            role="region"
-            aria-label="Pipeline table"
-            tabIndex={0}
-          >
-            <table aria-label="Open opportunities">
-              <thead>
-                <tr>
-                  <th scope="col">Opportunity / account</th>
-                  {columns.map((column) => (
-                    <th
-                      key={column.key}
-                      scope="col"
-                      aria-sort={
-                        (data.amountAvailable || column.key !== "Amount") &&
-                        sort.key === column.key
-                          ? sort.ascending
-                            ? "ascending"
-                            : "descending"
-                          : undefined
-                      }
-                    >
-                      {column.key === "Amount" && !data.amountAvailable ? (
-                        column.label
-                      ) : (
-                        <button
-                          className="sort"
-                          onClick={() => {
-                            onLeaveFollow();
-                            setSort({
-                              key: column.key,
-                              ascending:
-                                sort.key !== column.key || !sort.ascending
-                            });
-                            setPage(0);
-                          }}
-                        >
-                          {column.label}{" "}
-                          <span aria-hidden="true">
-                            {sort.key === column.key
-                              ? sort.ascending
-                                ? "↑"
-                                : "↓"
-                              : "↕"}
-                          </span>
-                        </button>
-                      )}
-                    </th>
+          <div className="panel table-panel">
+            <div
+              ref={tableRegion}
+              className="table-scroll"
+              role="region"
+              aria-label="Pipeline table"
+              tabIndex={0}
+            >
+              <table aria-label="Open opportunities">
+                <colgroup>
+                  {columns.map(({ key }) => (
+                    <col key={key} className={`column-${key}`} />
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {visible.map((row) => {
-                  const previewed = preview?.opportunityId === row.Id;
-                  const closeDate = previewed ? preview.date : row.CloseDate;
-                  return (
-                    <tr
-                      key={row.Id}
-                      ref={selected === row.Id ? selectedRow : undefined}
-                      className={selected === row.Id ? "selected" : undefined}
-                    >
-                      <th scope="row">
-                        {row.AccountId && row.accountName ? (
+                </colgroup>
+                <thead>
+                  <tr>
+                    {columns.map((column) => (
+                      <th
+                        key={column.key}
+                        scope="col"
+                        aria-sort={
+                          (data.amountAvailable || column.key !== "Amount") &&
+                          effectiveSort.key === column.key
+                            ? effectiveSort.ascending
+                              ? "ascending"
+                              : "descending"
+                            : undefined
+                        }
+                      >
+                        {column.key === "Amount" && !data.amountAvailable ? (
+                          column.label
+                        ) : (
                           <button
-                            className="opportunity"
-                            aria-pressed={selected === row.Id}
+                            className="sort"
                             onClick={() => {
-                              changePage(page);
-                              onSelect(row);
+                              changePage(0);
+                              setSort({
+                                key: column.key,
+                                ascending:
+                                  effectiveSort.key !== column.key ||
+                                  !effectiveSort.ascending
+                              });
                             }}
                           >
-                            {row.Name}
+                            {column.label}{" "}
+                            <span className="sort-indicator" aria-hidden="true">
+                              {effectiveSort.key === column.key
+                                ? effectiveSort.ascending
+                                  ? "↑"
+                                  : "↓"
+                                : "↕"}
+                            </span>
                           </button>
-                        ) : (
-                          row.Name
                         )}
-                        <small>
-                          {row.accountName
-                            ? accountDisplayName(row.accountName)
-                            : "Account unavailable"}
-                        </small>
                       </th>
-                      <td>{row.StageName ?? "Unavailable"}</td>
-                      <td>
-                        {closeDate ?? "Unavailable"}
-                        {previewed && <small>Saving date…</small>}
-                        {closeDate && closeDate < data.today && (
-                          <small className="overdue">Overdue</small>
-                        )}
-                      </td>
-                      <td>{amountText(row)}</td>
-                      <td>
-                        <HealthBadge health={row.health} />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((row) => {
+                    const previewed = preview?.opportunityId === row.Id;
+                    const closeDate = previewed ? preview.date : row.CloseDate;
+                    const overdue = Boolean(
+                      closeDate && closeDate < data.today
+                    );
+                    const overdueId = overdue
+                      ? "close-date-overdue-" + row.Id
+                      : undefined;
+                    const account = row.accountName
+                      ? accountDisplayName(row.accountName)
+                      : "Account unavailable";
+                    const stage = row.StageName ?? "Unavailable";
+                    const amount = amountText(row);
+                    const selectable = Boolean(
+                      row.AccountId && row.accountName
+                    );
+                    return (
+                      <tr
+                        key={row.Id}
+                        ref={selected === row.Id ? selectedRow : undefined}
+                        className={selected === row.Id ? "selected" : undefined}
+                        data-selectable={selectable || undefined}
+                        onClick={
+                          selectable
+                            ? () => {
+                                changePage(page, false);
+                                onSelect(row);
+                              }
+                            : undefined
+                        }
+                      >
+                        <th scope="row">
+                          {selectable ? (
+                            <button
+                              type="button"
+                              className="opportunity"
+                              aria-pressed={selected === row.Id}
+                              aria-describedby={overdueId}
+                              title={row.Name}
+                            >
+                              {row.Name}
+                            </button>
+                          ) : (
+                            <span className="cell-text" title={row.Name}>
+                              {row.Name}
+                            </span>
+                          )}
+                        </th>
+                        <td className="account-cell">
+                          <span className="cell-text" title={account}>
+                            {account}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="cell-text" title={stage}>
+                            {stage}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="cell-text" title={amount}>
+                            {amount}
+                          </span>
+                        </td>
+                        <td>
+                          <div
+                            className={
+                              overdue
+                                ? "table-close-date is-overdue"
+                                : "table-close-date"
+                            }
+                            title={
+                              overdue
+                                ? "Overdue — close date has passed"
+                                : undefined
+                            }
+                          >
+                            {closeDate ? (
+                              <time
+                                dateTime={closeDate}
+                                title={
+                                  overdue ? undefined : dateText(closeDate)
+                                }
+                              >
+                                {dateText(closeDate, tableDateFormat)}
+                              </time>
+                            ) : (
+                              <span>Unavailable</span>
+                            )}
+                            {overdue && (
+                              <>
+                                <WorkspaceIcon name="caution" />
+                                <span
+                                  id={overdueId}
+                                  className="visually-hidden"
+                                >
+                                  Overdue — close date has passed
+                                </span>
+                              </>
+                            )}
+                          </div>
+                          {previewed && (
+                            <span className="visually-hidden">
+                              Saving date…
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <HealthBadge health={row.health} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <nav className="pagination" aria-label="Pipeline pages">
+              <span className="page-range">
+                {(page * pageSize + 1).toLocaleString()}–
+                {(page * pageSize + visible.length).toLocaleString()} of{" "}
+                {rows.length.toLocaleString()}
+              </span>
+              <button
+                className="quiet"
+                aria-disabled={page === 0}
+                aria-label="Previous pipeline page"
+                onClick={() => {
+                  if (page > 0) changePage(page - 1);
+                }}
+              >
+                Previous
+              </button>
+              <span role="status">
+                Page {page + 1} of {pages}
+              </span>
+              <button
+                className="quiet"
+                aria-disabled={page + 1 >= pages}
+                aria-label="Next pipeline page"
+                onClick={() => {
+                  if (page + 1 < pages) changePage(page + 1);
+                }}
+              >
+                Next
+              </button>
+            </nav>
           </div>
-          <nav className="pagination" aria-label="Pipeline pages">
-            <button
-              className="quiet"
-              aria-disabled={page === 0}
-              aria-label="Previous pipeline page"
-              onClick={() => {
-                if (page > 0) changePage(page - 1);
-              }}
-            >
-              Previous
-            </button>
-            <span role="status">
-              Page {page + 1} of {pages}
-            </span>
-            <button
-              className="quiet"
-              aria-disabled={page + 1 >= pages}
-              aria-label="Next pipeline page"
-              onClick={() => {
-                if (page + 1 < pages) changePage(page + 1);
-              }}
-            >
-              Next
-            </button>
-          </nav>
         </>
       )}
     </>

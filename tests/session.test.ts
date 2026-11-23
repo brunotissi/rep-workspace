@@ -12,6 +12,8 @@ const users: Record<string, string> = {
 };
 const account = "001000000000001AAA";
 const opportunity = "006000000000001AAA";
+const otherOpportunity = "006000000000002AAA";
+const decisionContact = "003000000000001AAA";
 const client = { clientId: "test-client", clientSecret: "test-secret" };
 const page = (records: unknown[] = []) =>
   Response.json({ records, done: true });
@@ -125,11 +127,27 @@ test("OAuth sessions keep tokens and describe data separate, and snapshot access
       queries[name].push(query);
       if (query.includes("OwnerId =")) {
         assert.match(query, new RegExp(users[name]));
-        if (name === "alice" && query.includes(opportunity))
-          return page([{ Id: opportunity }]);
+        if (
+          name === "alice" &&
+          (query.includes(opportunity) || query.includes(otherOpportunity))
+        )
+          return page([
+            {
+              Id: query.includes(otherOpportunity)
+                ? otherOpportunity
+                : opportunity
+            }
+          ]);
       }
       if (name === "alice" && query.includes("FROM Account WHERE Id ="))
         return page([{ Id: account, Name: "Alice's account" }]);
+      if (
+        name === "alice" &&
+        query.startsWith("SELECT ContactId, OpportunityId")
+      )
+        return page([
+          { ContactId: decisionContact, OpportunityId: otherOpportunity }
+        ]);
       return page();
     }
     throw new Error("Unexpected simulated Salesforce route.");
@@ -173,7 +191,19 @@ test("OAuth sessions keep tokens and describe data separate, and snapshot access
       alice.cookie
     );
     assert.equal(available.status, 200);
-    assert.equal(JSON.parse(available.body).account.Name, "Alice's account");
+    const snapshot = JSON.parse(available.body);
+    assert.equal(snapshot.account.Name, "Alice's account");
+    assert.deepEqual(snapshot.decisionMakerIds, [decisionContact]);
+    assert.deepEqual(snapshot.selectedDecisionMakerIds, []);
+    assert.equal(snapshot.selectedDecisionMaker, false);
+    const other = await browser.send(
+      "/api/accounts/" + account + "?opportunity=" + otherOpportunity,
+      alice.cookie
+    );
+    assert.equal(other.status, 200);
+    const selected = JSON.parse(other.body);
+    assert.deepEqual(selected.selectedDecisionMakerIds, [decisionContact]);
+    assert.equal(selected.selectedDecisionMaker, true);
     assert.equal(
       (await browser.send(alice.callback, alice.attempt.cookie)).location,
       "/?error=oauth"

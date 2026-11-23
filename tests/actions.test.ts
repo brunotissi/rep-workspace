@@ -165,6 +165,7 @@ test("recommendation controls reflect describe data and unavailable evidence", a
       tasks: { data: [] },
       events: { data: [] },
       decisionMakerIds: [],
+      selectedDecisionMakerIds: undefined,
       selectedDecisionMaker: undefined,
       health: {
         data: accountHealth(
@@ -198,6 +199,7 @@ test("follow-up diagnostics distinguish an empty lookup from a Salesforce failur
     tasks: { data: [] },
     events: { data: [] },
     decisionMakerIds: [],
+    selectedDecisionMakerIds: [],
     selectedDecisionMaker: true
   };
   let reads = 0;
@@ -325,6 +327,58 @@ test("creates an account-linked open Task and blocks an existing follow-up", asy
     status: 409
   });
   assert.equal(duplicate.writes.length, 0);
+});
+
+test("a confirmed Task write removes follow-up on refresh and retains the other recommendation", async () => {
+  let saved = false;
+  const { service, writes } = fixture({
+    pendingTaskRead: () => json(saved ? [{ Id: taskId }] : []),
+    write: () => {
+      saved = true;
+      return Response.json({ success: true, id: taskId }, { status: 201 });
+    }
+  });
+  const snapshot = {
+    account: { Id: accountId, Name: "Demo account" },
+    today,
+    opportunities: {
+      data: [{ Id: opportunityId, Name: "Renewal", CloseDate: today }]
+    },
+    contacts: { data: [{ Id: contactId, Name: "Visible contact" }] },
+    tasks: { data: [] },
+    events: { data: [] },
+    decisionMakerIds: [],
+    selectedDecisionMakerIds: [],
+    selectedDecisionMaker: false,
+    health: {
+      data: accountHealth(
+        {
+          activity: "stale",
+          openCount: 1,
+          nearestClose: today,
+          decisionMaker: false
+        },
+        today
+      )
+    }
+  };
+  const before = await recommendations(service, snapshot, opportunityId);
+  assert.deepEqual(
+    before.items.map(({ kind }) => kind),
+    ["task", "contactRole"]
+  );
+  await performAction(service, userId, task);
+  const after = await recommendations(service, snapshot, opportunityId);
+  assert.equal(writes.length, 1);
+  assert.equal(after.pendingTask, true);
+  assert.deepEqual(
+    after.items.map(({ kind }) => kind),
+    ["contactRole"]
+  );
+  assert.equal(
+    after.items[0].reason,
+    "This opportunity has no visible Decision Maker contact role."
+  );
 });
 
 test("role action creates, updates, or leaves an already-correct record alone", async () => {
