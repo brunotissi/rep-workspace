@@ -1,3 +1,4 @@
+import { opportunityHealth } from "../server/opportunity-health";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
@@ -13,6 +14,7 @@ import {
   excludingFilters,
   healthCounts,
   pipelinePage,
+  decodePipeline,
   selectRows,
   type Row
 } from "../client/pipeline";
@@ -311,8 +313,16 @@ test("pipeline reads Salesforce continuation pages, batches account evidence, an
       return json([{ AccountId: accountId, activityCount: 1 }]);
     }
     if (soql.includes("FROM Event")) return json([]);
-    if (soql.includes("FROM OpportunityContactRole"))
-      return json([{ Opportunity: { AccountId: accountId } }]);
+    if (soql.includes("FROM OpportunityContactRole")) {
+      assert.match(soql, /WHERE Role = 'Decision Maker' AND OpportunityId IN/);
+      const ids = soql.match(/006[0-9]{12}AAA/g) ?? [];
+      assert.ok(ids.length <= 175);
+      return json(
+        ids
+          .filter((id) => id !== sample[0].Id)
+          .map((OpportunityId) => ({ OpportunityId }))
+      );
+    }
     if (soql.includes("FROM Account"))
       return json([{ Id: accountId, Name: "Alder Logistics" }]);
     throw new Error("Unexpected query");
@@ -320,7 +330,8 @@ test("pipeline reads Salesforce continuation pages, batches account evidence, an
 
   const result = await service.pipeline(userId, today);
   assert.equal(result.rows.length, 1100);
-  assert.equal(calls.length, 9);
+  assert.equal(calls.length, 12);
+  assert.equal(result.rows[0].health.status, "Amber");
   assert.equal(result.rows[1099].accountName, "Alder Logistics");
   assert.equal(result.rows[1099].health?.status, "Green");
   assert.equal(result.rows[1099].Amount, undefined);
@@ -330,9 +341,9 @@ test("pipeline reads Salesforce continuation pages, batches account evidence, an
     { ...emptyFilters, health: "Green", stage: "Prospecting" },
     { key: "CloseDate", ascending: true }
   );
-  assert.equal(ordered.length, 1100);
-  assert.equal(ordered.slice(1050, 1100).length, 50);
-  assert.equal(new Set(ordered.map((row) => row.Id)).size, 1100);
+  assert.equal(ordered.length, 1099);
+  assert.equal(ordered.slice(1050, 1100).length, 49);
+  assert.equal(new Set(ordered.map((row) => row.Id)).size, 1099);
 });
 
 test("amounts use Salesforce currency formatting while filters use the numeric field", async () => {
@@ -423,7 +434,7 @@ test("snapshot keeps account and opportunities when activity and contacts fail",
 
 test("filters and sorts the full pipeline before slicing a display page", () => {
   const visibility: Pick<Row, "health" | "accountName"> = {
-    health: undefined,
+    health: opportunityHealth(undefined, undefined, today),
     accountName: undefined
   };
   const rows: Row[] = [
@@ -496,6 +507,7 @@ const sampleOpportunity: Row = {
   health: {
     status: "Amber",
     reasons: ["Needs a follow-up."],
+    reasonCodes: ["missingDecisionMaker"],
     incomplete: false
   }
 };
@@ -633,6 +645,7 @@ test("confirmed close-date saves follow the selected row across pages and respec
         today,
         rows: refreshed,
         accountWarning: undefined,
+        healthScope: "opportunity",
         amountAvailable: true
       },
       selected: sampleOpportunity.Id,
@@ -742,6 +755,7 @@ test("unreadable Amount is labeled without exposing filter or sort controls", ()
     createElement(Pipeline, {
       data: {
         today,
+        healthScope: "opportunity",
         amountAvailable: false,
         accountWarning: undefined,
         rows: [{ ...sampleOpportunity, Amount: undefined }]
@@ -760,7 +774,7 @@ test("unreadable Amount is labeled without exposing filter or sort controls", ()
 });
 
 test("quick health counts use all matching rows before health and pagination", () => {
-  const green = { status: "Green", incomplete: false, reasons: [] } as const;
+  const green = opportunityHealth("2026-12-10", true, today);
   const row = {
     ...sampleOpportunity,
     Name: "Renewal",
@@ -780,11 +794,16 @@ test("quick health counts use all matching rows before health and pagination", (
       health: {
         status: "Amber",
         unassessed: true,
+        reasonCodes: [],
         incomplete: true,
         reasons: []
       }
     },
-    { ...row, Id: "missing", health: undefined },
+    {
+      ...row,
+      Id: "missing",
+      health: opportunityHealth(undefined, undefined, today)
+    },
     { ...row, Id: "different-stage", StageName: "Prospecting" },
     { ...row, Id: "different-name", Name: "Expansion" },
     { ...row, Id: "different-date", CloseDate: "2026-11-22" },
@@ -845,6 +864,7 @@ test("workspace controls start collapsed and preserve restricted table semantics
     createElement(Pipeline, {
       data: {
         today,
+        healthScope: "opportunity",
         amountAvailable: false,
         rows: [sampleOpportunity],
         accountWarning: undefined
@@ -879,6 +899,7 @@ test("selectable rows retain one native selection button and context uses the se
     createElement(Pipeline, {
       data: {
         today,
+        healthScope: "opportunity",
         amountAvailable: true,
         rows: [first, second, unavailable],
         accountWarning: undefined
@@ -901,7 +922,7 @@ test("selectable rows retain one native selection button and context uses the se
         ...second,
         StageName: "Id. Decision Makers",
         Amount: undefined,
-        health: undefined
+        health: opportunityHealth(undefined, undefined, today)
       },
       onReturn: () => {}
     })
@@ -920,6 +941,7 @@ test("pipeline keeps a machine-readable date and labeled inline overdue warning"
     createElement(Pipeline, {
       data: {
         today,
+        healthScope: "opportunity",
         amountAvailable: true,
         rows: [
           sampleOpportunity,
@@ -991,4 +1013,221 @@ test("Opportunity and displayed Account sort in both directions with stable ties
   assert.deepEqual(order("Name", false), ["3", "4", "1", "2"]);
   assert.deepEqual(order("accountName", true), ["1", "3", "2", "4"]);
   assert.deepEqual(order("accountName", false), ["2", "1", "3", "4"]);
+});
+
+test("opportunity health uses calendar boundaries and preserves known risk with partial evidence", () => {
+  const assess = (date: string | undefined, covered: boolean | undefined) =>
+    opportunityHealth(date, covered, "2026-03-26");
+  assert.deepEqual(assess("2026-04-02", false).reasonCodes, [
+    "closingSoon",
+    "missingDecisionMaker"
+  ]);
+  assert.equal(assess("2026-04-02", false).status, "Red");
+  assert.equal(assess("2026-04-02", undefined).status, "Amber");
+  assert.equal(assess("2026-04-03", true).status, "Green");
+  assert.equal(assess("2026-04-03", false).status, "Amber");
+  assert.equal(assess("2026-04-03", undefined).unassessed, true);
+  assert.equal(assess("2026-03-25", undefined).status, "Red");
+  assert.equal(assess("2026-03-26", true).status, "Amber");
+  assert.equal(assess("2026-02-30", true).unassessed, true);
+  assert.equal(assess(undefined, false).status, "Amber");
+  assert.equal(assess(undefined, undefined).unassessed, true);
+});
+
+test("a failed role query preserves overdue evidence without inventing missing coverage", async () => {
+  for (const incomplete of [false, true]) {
+    const service = workspace(async (path) => {
+      if (path.endsWith("/Opportunity/describe"))
+        return Response.json({
+          queryable: true,
+          fields: [{ name: "CloseDate" }, { name: "AccountId" }]
+        });
+      if (path.endsWith("/Account/describe"))
+        return Response.json({ queryable: true, fields: [] });
+      const soql = new URL(path, "https://example.com").searchParams.get("q")!;
+      if (soql.includes("FROM OpportunityContactRole"))
+        return incomplete
+          ? Response.json({
+              records: [{ OpportunityId: "006000000000001AAA" }],
+              done: false
+            })
+          : Response.json([{ errorCode: "INVALID_FIELD" }], { status: 400 });
+      if (soql.includes("FROM Account"))
+        return json([{ Id: accountId, Name: "Example" }]);
+      return json([
+        {
+          Id: "006000000000001AAA",
+          AccountId: accountId,
+          Name: "Overdue",
+          CloseDate: "2026-11-20"
+        },
+        {
+          Id: "006000000000002AAA",
+          AccountId: accountId,
+          Name: "Later",
+          CloseDate: "2026-12-20"
+        }
+      ]);
+    }, new Map());
+    const result = await service.pipeline(userId, today);
+    assert.deepEqual(
+      result.rows.map((row) => row.health.reasonCodes),
+      [["overdue", "unknownDecisionMaker"], ["unknownDecisionMaker"]]
+    );
+    assert.equal(result.rows[0].health.status, "Red");
+    assert.equal(result.rows[1].health.unassessed, true);
+    const html = renderToStaticMarkup(
+      createElement(Pipeline, {
+        data: result,
+        onSelect: () => {},
+        onFollow: () => {},
+        onLeaveFollow: () => {}
+      })
+    );
+    assert.match(html, /Opportunity health for Later: Unavailable/);
+    assert.match(html, /aria-expanded="false"/);
+  }
+});
+
+test("a 1,080-row legacy response is rejected instead of showing an all-unavailable pipeline", () => {
+  const rows = Array.from({ length: 1080 }, () => ({
+    ...sampleOpportunity,
+    health: {
+      status: "Red",
+      reasons: ["Account is overdue"],
+      incomplete: false
+    }
+  }));
+  const response = { today, amountAvailable: true, rows };
+  assert.throws(() => decodePipeline(response), /different Pipeline versions/);
+  assert.throws(
+    () => decodePipeline({ ...response, healthScope: "opportunity" }),
+    /different Pipeline versions/
+  );
+  assert.throws(
+    () => decodePipeline({ ...response, rows: [] }),
+    /different Pipeline versions/
+  );
+});
+
+test("decoded health drives badge text, counts, sorting and filtering together", () => {
+  const evidence = [
+    ["Unknown role on overdue", "2026-11-16", undefined],
+    ["Covered overdue", "2026-11-17", true],
+    ["Upcoming unknown", "2026-11-25", undefined],
+    ["Healthy covered", "2026-12-10", true],
+    ["Missing coverage", "2026-12-10", false],
+    ["Unknown future", "2026-12-10", undefined]
+  ] as const;
+  const rows = evidence.map(([Name, CloseDate, covered], index) => ({
+    ...sampleOpportunity,
+    Id: String(index),
+    Name,
+    CloseDate,
+    health: opportunityHealth(CloseDate, covered, today)
+  }));
+  const data = decodePipeline(
+    JSON.parse(
+      JSON.stringify({
+        healthScope: "opportunity",
+        today,
+        amountAvailable: true,
+        rows
+      })
+    )
+  );
+  assert.deepEqual(healthCounts(data.rows, emptyFilters), {
+    All: 6,
+    Green: 1,
+    Amber: 2,
+    Red: 2
+  });
+  const sort = { key: "health", ascending: true } as const;
+  assert.deepEqual(
+    selectRows(data.rows, emptyFilters, sort).map(({ Id }) => Id),
+    ["0", "1", "2", "4", "3", "5"]
+  );
+  assert.deepEqual(
+    selectRows(data.rows, { ...emptyFilters, health: "Red" }, sort).map(
+      ({ Id }) => Id
+    ),
+    ["0", "1"]
+  );
+  const html = renderToStaticMarkup(
+    createElement(Pipeline, {
+      data,
+      onSelect: () => {},
+      onFollow: () => {},
+      onLeaveFollow: () => {}
+    })
+  );
+  assert.match(html, /Opportunity health for Covered overdue: Needs attention/);
+  assert.match(html, /Opportunity health for Upcoming unknown: At risk/);
+  assert.match(html, /Opportunity health for Healthy covered: Healthy/);
+  assert.match(html, /Opportunity health for Unknown future: Unavailable/);
+});
+
+test("an impossible Account close date is unknown, while confirmed stale activity stays critical", () => {
+  const evidence = {
+    activity: "recent" as const,
+    openCount: 1,
+    nearestClose: "2026-02-30",
+    decisionMaker: true
+  };
+  const unknown = accountHealth(evidence, today);
+  assert.equal(unknown.unassessed, true);
+  assert.deepEqual(unknown.reasons, ["Close-date information is unavailable."]);
+  assert.equal(
+    accountHealth({ ...evidence, activity: "stale" }, today).status,
+    "Red"
+  );
+});
+
+test("prioritization by reason distinguishes overdue from near-term risks within the same status", () => {
+  const rows = [
+    {
+      ...sampleOpportunity,
+      Id: "past",
+      health: opportunityHealth("2026-11-16", true, today)
+    },
+    {
+      ...sampleOpportunity,
+      Id: "near",
+      health: opportunityHealth("2026-11-25", false, today)
+    },
+    {
+      ...sampleOpportunity,
+      Id: "later",
+      health: opportunityHealth("2026-12-19", false, today)
+    }
+  ];
+  const filters = { ...emptyFilters, health: "Red", reason: "closingSoon" };
+  assert.deepEqual(
+    selectRows(rows, filters, closeSort).map(({ Id }) => Id),
+    ["near"]
+  );
+  assert.deepEqual(healthCounts(rows, filters), {
+    All: 1,
+    Green: 0,
+    Amber: 0,
+    Red: 1
+  });
+  assert.equal(
+    activeDimensions(filters).at(-1)?.value,
+    "Closing within seven days"
+  );
+});
+
+test("a current Pipeline contract rejects malformed assessments before deriving counts", () => {
+  const health = { ...sampleOpportunity.health, status: "Not a status" };
+  assert.throws(
+    () =>
+      decodePipeline({
+        today,
+        healthScope: "opportunity",
+        amountAvailable: true,
+        rows: [{ ...sampleOpportunity, health }]
+      }),
+    /invalid Pipeline data/
+  );
 });

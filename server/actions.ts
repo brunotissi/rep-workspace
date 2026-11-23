@@ -1,3 +1,4 @@
+import { calendarDay } from "./calendar";
 import { recordId, WorkspaceError, type workspace } from "./workspace";
 import type { Health } from "./health";
 
@@ -29,7 +30,7 @@ export function recommend(evidence: {
   decisionMaker?: boolean;
 }): Candidate[] {
   const results: Candidate[] = [];
-  if (evidence.closeDate && evidence.closeDate < evidence.today)
+  if (calendarDay(evidence.closeDate) < calendarDay(evidence.today))
     results.push({
       kind: "closeDate",
       title: "Update the close date",
@@ -57,12 +58,7 @@ export function recommend(evidence: {
 }
 
 function dateOnly(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-    !Number.isNaN(Date.parse(value)) &&
-    new Date(value).toISOString().slice(0, 10) === value
-  );
+  return Number.isFinite(calendarDay(value));
 }
 
 export function parseAction(input: unknown, today: string): ActionInput {

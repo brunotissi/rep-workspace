@@ -1,3 +1,4 @@
+import { decodePipeline } from "../client/pipeline";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
@@ -126,6 +127,15 @@ test("OAuth sessions keep tokens and describe data separate, and snapshot access
       const query = url.searchParams.get("q")!;
       queries[name].push(query);
       if (query.includes("OwnerId =")) {
+        if (query.includes("ORDER BY Id") && name === "alice")
+          return page([
+            {
+              Id: opportunity,
+              AccountId: account,
+              Name: "Overdue deal",
+              CloseDate: "2000-01-01"
+            }
+          ]);
         assert.match(query, new RegExp(users[name]));
         if (
           name === "alice" &&
@@ -169,9 +179,12 @@ test("OAuth sessions keep tokens and describe data separate, and snapshot access
       );
       const who = await browser.send("/api/session", session.cookie);
       assert.deepEqual(JSON.parse(who.body), { username: name });
-      assert.equal(
-        (await browser.send("/api/pipeline", session.cookie)).status,
-        200
+      const response = await browser.send("/api/pipeline", session.cookie);
+      assert.equal(response.status, 200);
+      const pipeline = decodePipeline(JSON.parse(response.body));
+      assert.deepEqual(
+        pipeline.rows.map((row) => row.health.status),
+        name === "alice" ? ["Red"] : []
       );
     }
     assert.match(queries.alice[0], /FORMAT\(Amount\)/);

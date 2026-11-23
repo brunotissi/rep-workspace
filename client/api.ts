@@ -10,7 +10,10 @@ export class ApiError extends Error {
   }
 }
 
-export function useRead<T>(url: string | undefined) {
+export function useRead<T>(
+  url: string | undefined,
+  decode?: (data: unknown) => T
+) {
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<{
     url: string;
@@ -30,7 +33,8 @@ export function useRead<T>(url: string | undefined) {
             data?.error ?? "The request could not be completed."
           );
         if (!data) throw new ApiError(502, "The response could not be read.");
-        if (!controller.signal.aborted) setResult({ url, attempt, data });
+        if (!controller.signal.aborted)
+          setResult({ url, attempt, data: decode ? decode(data) : data });
       })
       .catch((error) => {
         if (!controller.signal.aborted)
@@ -45,7 +49,7 @@ export function useRead<T>(url: string | undefined) {
           }));
       });
     return () => controller.abort();
-  }, [url, attempt]);
+  }, [url, attempt, decode]);
   const cached = result?.url === url ? result : undefined;
   const current = cached?.attempt === attempt ? cached : undefined;
   return {

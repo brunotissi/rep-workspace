@@ -1363,3 +1363,27 @@ small {
 #next-actions-title {
   scroll-margin: 12px;
 }
+
+.opportunity-health {
+  display: block;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: start;
+  cursor: pointer;
+}
+
+.opportunity-health[aria-expanded="true"] .badge,
+.opportunity-health:hover .badge {
+  text-decoration: underline;
+}
+
+.health-explanation td {
+  white-space: normal;
+  padding-inline: 1rem;
+}
+
+.health-explanation ul {
+  margin: 0.35rem 0 0;
+  padding-inline-start: 1rem;
+}

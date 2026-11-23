@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from "react";
 import {
   accountDisplayName,
   activeDimensions,
@@ -7,6 +14,7 @@ import {
   emptyFilters,
   excludingFilters,
   healthLabels,
+  healthReasonLabels,
   healthStatus,
   pipelinePage,
   selectRows,
@@ -90,6 +98,7 @@ export function Pipeline({
   onDetails?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [explained, setExplained] = useState<string>();
   const filtersButton = useRef<HTMLButtonElement>(null);
   const [filters, setFilters] = useState(emptyFilters);
   const [sort, setSort] = useState<{ key: SortKey; ascending: boolean }>({
@@ -170,7 +179,7 @@ export function Pipeline({
     setPage(page);
   }
   function selectFilter(
-    key: "stage" | "health",
+    key: "stage" | "health" | "reason",
     label: string,
     options: (string | undefined)[]
   ) {
@@ -186,7 +195,11 @@ export function Pipeline({
             <option key={option} value={option}>
               {key === "health"
                 ? healthLabels[option as keyof typeof healthLabels]
-                : option}
+                : key === "reason"
+                  ? healthReasonLabels[
+                      option as keyof typeof healthReasonLabels
+                    ]
+                  : option}
             </option>
           ))}
         </select>
@@ -222,7 +235,7 @@ export function Pipeline({
       <div
         className="health-filters"
         role="group"
-        aria-label="Filter by account health"
+        aria-label="Filter by opportunity health"
       >
         {(["All", "Green", "Amber", "Red"] as const).map((status) => {
           const value = status === "All" ? "" : status;
@@ -319,6 +332,11 @@ export function Pipeline({
           "Red",
           "Unavailable"
         ])}
+        {selectFilter(
+          "reason",
+          "Health reason",
+          Object.keys(healthReasonLabels)
+        )}
         <small className="filter-help">Filters apply as you change them.</small>
       </fieldset>
       {(dimensions.length > 0 || filters.search) && (
@@ -474,99 +492,139 @@ export function Pipeline({
                       row.AccountId && row.accountName
                     );
                     return (
-                      <tr
-                        key={row.Id}
-                        ref={selected === row.Id ? selectedRow : undefined}
-                        className={selected === row.Id ? "selected" : undefined}
-                        data-selectable={selectable || undefined}
-                        onClick={
-                          selectable
-                            ? () => {
-                                changePage(page, false);
-                                onSelect(row);
+                      <Fragment key={row.Id}>
+                        <tr
+                          ref={selected === row.Id ? selectedRow : undefined}
+                          className={
+                            selected === row.Id ? "selected" : undefined
+                          }
+                          data-selectable={selectable || undefined}
+                          onClick={
+                            selectable
+                              ? () => {
+                                  changePage(page, false);
+                                  onSelect(row);
+                                }
+                              : undefined
+                          }
+                        >
+                          <th scope="row">
+                            {selectable ? (
+                              <button
+                                type="button"
+                                className="opportunity"
+                                aria-pressed={selected === row.Id}
+                                aria-describedby={overdueId}
+                                title={row.Name}
+                              >
+                                {row.Name}
+                              </button>
+                            ) : (
+                              <span className="cell-text" title={row.Name}>
+                                {row.Name}
+                              </span>
+                            )}
+                          </th>
+                          <td className="account-cell">
+                            <span className="cell-text" title={account}>
+                              {account}
+                            </span>
+                          </td>
+                          <td>
+                            <span className="cell-text" title={stage}>
+                              {stage}
+                            </span>
+                          </td>
+                          <td>
+                            <span className="cell-text" title={amount}>
+                              {amount}
+                            </span>
+                          </td>
+                          <td>
+                            <div
+                              className={
+                                overdue
+                                  ? "table-close-date is-overdue"
+                                  : "table-close-date"
                               }
-                            : undefined
-                        }
-                      >
-                        <th scope="row">
-                          {selectable ? (
+                              title={
+                                overdue
+                                  ? "Overdue — close date has passed"
+                                  : undefined
+                              }
+                            >
+                              {closeDate ? (
+                                <time
+                                  dateTime={closeDate}
+                                  title={
+                                    overdue ? undefined : dateText(closeDate)
+                                  }
+                                >
+                                  {dateText(closeDate, tableDateFormat)}
+                                </time>
+                              ) : (
+                                <span>Unavailable</span>
+                              )}
+                              {overdue && (
+                                <>
+                                  <WorkspaceIcon name="caution" />
+                                  <span
+                                    id={overdueId}
+                                    className="visually-hidden"
+                                  >
+                                    Overdue — close date has passed
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            {previewed && (
+                              <span className="visually-hidden">
+                                Saving date…
+                              </span>
+                            )}
+                          </td>
+                          <td>
                             <button
                               type="button"
-                              className="opportunity"
-                              aria-pressed={selected === row.Id}
-                              aria-describedby={overdueId}
-                              title={row.Name}
+                              className="opportunity-health"
+                              aria-label={`Opportunity health for ${row.Name}: ${healthLabels[healthStatus(row.health) ?? "Unavailable"]}`}
+                              aria-expanded={explained === row.Id}
+                              aria-controls={
+                                explained === row.Id
+                                  ? "health-" + row.Id
+                                  : undefined
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setExplained((current) =>
+                                  current === row.Id ? undefined : row.Id
+                                );
+                              }}
                             >
-                              {row.Name}
+                              <HealthBadge health={row.health} />
                             </button>
-                          ) : (
-                            <span className="cell-text" title={row.Name}>
-                              {row.Name}
-                            </span>
-                          )}
-                        </th>
-                        <td className="account-cell">
-                          <span className="cell-text" title={account}>
-                            {account}
-                          </span>
-                        </td>
-                        <td>
-                          <span className="cell-text" title={stage}>
-                            {stage}
-                          </span>
-                        </td>
-                        <td>
-                          <span className="cell-text" title={amount}>
-                            {amount}
-                          </span>
-                        </td>
-                        <td>
-                          <div
-                            className={
-                              overdue
-                                ? "table-close-date is-overdue"
-                                : "table-close-date"
-                            }
-                            title={
-                              overdue
-                                ? "Overdue — close date has passed"
-                                : undefined
-                            }
+                          </td>
+                        </tr>
+                        {explained === row.Id && (
+                          <tr
+                            className="health-explanation"
+                            id={"health-" + row.Id}
                           >
-                            {closeDate ? (
-                              <time
-                                dateTime={closeDate}
-                                title={
-                                  overdue ? undefined : dateText(closeDate)
-                                }
-                              >
-                                {dateText(closeDate, tableDateFormat)}
-                              </time>
-                            ) : (
-                              <span>Unavailable</span>
-                            )}
-                            {overdue && (
-                              <>
-                                <WorkspaceIcon name="caution" />
-                                <span
-                                  id={overdueId}
-                                  className="visually-hidden"
-                                >
-                                  Overdue — close date has passed
-                                </span>
-                              </>
-                            )}
-                          </div>
-                          {previewed && (
-                            <span className="visually-hidden">
-                              Saving date…
-                            </span>
-                          )}
-                        </td>
-                        <td>
-                          <HealthBadge health={row.health} />
-                        </td>
-                      </tr>
+                            <td colSpan={columns.length}>
+                              <strong>Opportunity health reasons</strong>
+                              <ul>
+                                {(
+                                  row.health?.reasons ?? [
+                                    "Opportunity health could not be assessed."
+                                  ]
+                                ).map((reason) => (
+                                  <li key={reason}>{reason}</li>
+                                ))}
+                              </ul>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     );
                   })}
                 </tbody>

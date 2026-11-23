@@ -53,7 +53,7 @@ Verify is strict by default. An intentional demo edit to a seeded close date wil
 
 ## Verify the seeded dataset through the app
 
-Restart the app, sign in as the configured owner, and open DevTools. The pipeline endpoint uses the actual app filters for ownership and the production account health rules. Run this in the console with the GUID printed by PowerShell:
+Restart the app and sign in as the configured owner. The pipeline endpoint scopes rows to the signed-in rep and returns Opportunity Health. In DevTools, count records by the exact dataset marker and summarize the row assessments without printing record data:
 
 ```js
 const dataset = "<dataset GUID from PowerShell>";
@@ -64,38 +64,24 @@ const { rows } = await response.json();
 const seeded = rows.filter((row) =>
   row.accountName?.startsWith("RW Demo " + dataset + " | ")
 );
-const accounts = new Map(seeded.map((row) => [row.AccountId, row.health]));
-const counts = { Green: 0, Amber: 0, Red: 0, Incomplete: 0 };
-for (const health of accounts.values()) {
-  counts[health?.status ?? "Incomplete"]++;
-  if (health?.incomplete) counts.Incomplete++;
+const counts = { Green: 0, Amber: 0, Red: 0, Unavailable: 0 };
+for (const { health } of seeded) {
+  counts[!health || health.unassessed ? "Unavailable" : health.status]++;
 }
-console.table({
-  opportunities: seeded.length,
-  accounts: accounts.size,
-  ...counts
-});
-if (
-  seeded.length !== 1080 ||
-  accounts.size !== 30 ||
-  counts.Green !== 10 ||
-  counts.Amber !== 10 ||
-  counts.Red !== 10 ||
-  counts.Incomplete !== 0
-) {
-  throw new Error(
-    "Unexpected seeded dataset or health distribution. Check visibility, dates, and health reasons."
-  );
+const accounts = new Set(seeded.map((row) => row.AccountId)).size;
+console.table({ opportunities: seeded.length, accounts, ...counts });
+if (seeded.length !== 1080 || accounts !== 30) {
+  throw new Error("Unexpected dataset size. Check ownership and visibility.");
 }
 ```
 
-Verify on the UTC anchor date. Health follows current dates, so later runs can legitimately change the distribution. In the UI, filter each health, spot-check one seeded snapshot per color, and compare amount/currency against the Salesforce record. Clear filters and check the first and last page, then sort Amount in both directions and apply a stage and close-date range. Confirm counts and page position reset when filters change.
+Distributions depend on the business date, intentional fixture edits, and the viewer's permissions. Check health reasons on individual Pipeline rows and verify Account Health separately in Snapshot.
 
 For performance evidence, disable the browser cache in DevTools, reload three times, and record the pipeline request durations, median, and transferred bytes. Check responsiveness by changing a filter and moving between pages on the large dataset. Neither operation should add a pipeline request. Record the actual observations rather than treating the offline fixture as a live measurement.
 
-### Verified performance
+### Historical live performance (before Opportunity Health)
 
-The 1,080-opportunity EUR demo dataset was verified in the browser. Three measured application requests to `/api/pipeline` took **1.26 s, 1.23 s, and 1.12 s** (median **1.23 s**). Sorting, filtering, and paging remained responsive and sent zero additional pipeline requests. The app batches Salesforce reads by account, uses query continuation when needed, and renders up to 50 rows per page.
+The 1,080-opportunity EUR demo dataset was verified in the browser. Three measured application requests to `/api/pipeline` took **1.26 s, 1.23 s, and 1.12 s** (median **1.23 s**). Sorting, filtering, and paging remained responsive and sent zero additional pipeline requests. See the [current benchmark and follow-up](delivery.md#performance-comparison).
 
 ## Next best actions
 

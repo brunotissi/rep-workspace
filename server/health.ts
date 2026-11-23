@@ -1,3 +1,5 @@
+import { calendarDay, closeProximityDays } from "./calendar";
+
 export type Health = {
   status: "Green" | "Amber" | "Red";
   reasons: string[];
@@ -17,13 +19,13 @@ export function accountHealth(evidence: Evidence, today: string): Health {
   const reasons: string[] = [];
   let critical = false;
   let risk = false;
-  const daysFromToday = (date: string) =>
-    (Date.parse(date.slice(0, 10)) - Date.parse(today)) / 86_400_000;
   const { activity, openCount, nearestClose, decisionMaker } = evidence;
+  const daysToClose = calendarDay(nearestClose) - calendarDay(today);
+  const closeUnavailable = Boolean(openCount && !Number.isFinite(daysToClose));
   const incomplete =
     activity === undefined ||
     openCount === undefined ||
-    Boolean(openCount && !nearestClose) ||
+    closeUnavailable ||
     decisionMaker === undefined;
 
   if (activity === undefined)
@@ -42,12 +44,11 @@ export function accountHealth(evidence: Evidence, today: string): Health {
     risk = true;
     reasons.push("No open opportunities are visible.");
   }
-  if (openCount && !nearestClose)
-    reasons.push("Close-date information is unavailable.");
-  if (nearestClose && daysFromToday(nearestClose) < 0) {
+  if (closeUnavailable) reasons.push("Close-date information is unavailable.");
+  if (daysToClose < 0) {
     critical = true;
     reasons.push("A visible open opportunity is overdue.");
-  } else if (nearestClose && daysFromToday(nearestClose) <= 7) {
+  } else if (daysToClose <= closeProximityDays) {
     risk = true;
     reasons.push("An open opportunity closes within seven days.");
   }

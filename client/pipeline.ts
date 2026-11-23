@@ -1,3 +1,5 @@
+import type { OpportunityReason } from "../server/opportunity-health";
+import { ApiError } from "./api";
 import type { workspace } from "../server/workspace";
 
 export type PipelineData = Awaited<
@@ -13,6 +15,7 @@ export const emptyFilters = {
   search: "",
   stage: "",
   health: "",
+  reason: "",
   from: "",
   through: "",
   minimum: "",
@@ -26,6 +29,14 @@ export const healthLabels = {
   Unavailable: "Unavailable"
 };
 
+export const healthReasonLabels = {
+  overdue: "Overdue close date",
+  closingSoon: "Closing within seven days",
+  missingDecisionMaker: "No visible Decision Maker",
+  unknownCloseDate: "Close date unavailable",
+  unknownDecisionMaker: "Decision Maker coverage unavailable"
+} satisfies Partial<Record<OpportunityReason, string>>;
+
 export function accountDisplayName(name: string) {
   return name.replace(
     /^RW Demo [0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12} \| (?=\S)/,
@@ -33,12 +44,51 @@ export function accountDisplayName(name: string) {
   );
 }
 
-export function healthStatus(health: Row["health"]) {
+export function healthStatus(
+  health?: Pick<Row["health"], "status" | "unassessed">
+) {
   return health && !health.unassessed ? health.status : undefined;
 }
 
+export function decodePipeline(data: unknown): PipelineData {
+  const pipeline = data as Partial<PipelineData> | null;
+  if (
+    typeof pipeline?.today !== "string" ||
+    typeof pipeline.amountAvailable !== "boolean" ||
+    !Array.isArray(pipeline.rows)
+  )
+    throw new ApiError(502, "The Pipeline response could not be read.");
+  if (
+    pipeline.healthScope !== "opportunity" ||
+    pipeline.rows.some((row) => !Array.isArray(row?.health?.reasonCodes))
+  )
+    throw new ApiError(
+      502,
+      "The server and browser are running different Pipeline versions. Restart the local Rep Workspace server, then reload and sign in again."
+    );
+  if (
+    pipeline.rows.some(
+      ({ Id, Name, health }) =>
+        typeof Id !== "string" ||
+        typeof Name !== "string" ||
+        !Object.hasOwn(healthOrder, health.status) ||
+        typeof health.incomplete !== "boolean" ||
+        (health.unassessed !== undefined &&
+          typeof health.unassessed !== "boolean") ||
+        !Array.isArray(health.reasons) ||
+        health.reasons.some((reason) => typeof reason !== "string")
+    )
+  )
+    throw new ApiError(
+      502,
+      "The server returned invalid Pipeline data. Retry to reload it."
+    );
+  return pipeline as PipelineData;
+}
+
 function filterChecks(filters: typeof emptyFilters) {
-  const { search, stage, health, from, through, minimum, maximum } = filters;
+  const { search, stage, health, reason, from, through, minimum, maximum } =
+    filters;
   const normalize = (value: string) =>
     value.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
   const tokens = normalize(search).trim().split(/\s+/).filter(Boolean);
@@ -59,6 +109,12 @@ function filterChecks(filters: typeof emptyFilters) {
     checks.push({
       label: "health",
       matches: (row) => (healthStatus(row.health) ?? "Unavailable") === health
+    });
+  if (reason)
+    checks.push({
+      label: "health reason",
+      matches: (row) =>
+        row.health.reasonCodes.includes(reason as OpportunityReason)
     });
   if (from || through)
     checks.push({
@@ -100,7 +156,7 @@ export function healthCounts(rows: Row[], filters: typeof emptyFilters) {
 }
 
 export function activeDimensions(filters: typeof emptyFilters) {
-  const { stage, health, from, through, minimum, maximum } = filters;
+  const { stage, health, reason, from, through, minimum, maximum } = filters;
   return [
     { label: "Stage", value: stage, keys: ["stage"] },
     {
@@ -121,6 +177,11 @@ export function activeDimensions(filters: typeof emptyFilters) {
       label: "Health",
       value: healthLabels[health as keyof typeof healthLabels],
       keys: ["health"]
+    },
+    {
+      label: "Health reason",
+      value: healthReasonLabels[reason as keyof typeof healthReasonLabels],
+      keys: ["reason"]
     }
   ].filter(({ value }) => value);
 }

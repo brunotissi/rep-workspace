@@ -1,4 +1,6 @@
+import { accountActivityDays } from "./calendar";
 import { accountHealth } from "./health";
+import { opportunityHealth } from "./opportunity-health";
 
 const api = "/services/data/v68.0";
 export type SalesforceWrite = {
@@ -354,7 +356,9 @@ export function workspace(
 
   async function evidence(ids: string[], today: string) {
     const health = new Map<string, ReturnType<typeof accountHealth>>();
-    const cutoff = new Date(Date.parse(today) - 21 * 86_400_000)
+    const cutoff = new Date(
+      Date.parse(today) - accountActivityDays * 86_400_000
+    )
       .toISOString()
       .slice(0, 10);
     const accountSet = (batch: string[]) =>
@@ -457,13 +461,49 @@ export function workspace(
     return health;
   }
 
+  async function opportunityCoverage(ids: string[]) {
+    const coverage = new Map<string, boolean>();
+    for (const window of chunks(chunks(ids, 175), 3)) {
+      const results = await Promise.allSettled(
+        window.map(async (batch) => {
+          const scope = batch.map((id) => "'" + id + "'").join(",");
+          const roles = await query<{ OpportunityId: string }>(
+            "SELECT OpportunityId FROM OpportunityContactRole WHERE Role = 'Decision Maker'" +
+              " AND OpportunityId IN (" +
+              scope +
+              ") GROUP BY OpportunityId"
+          );
+          if (!roles.every((role) => recordId(role?.OpportunityId)))
+            throw new WorkspaceError(
+              502,
+              "Salesforce returned unreadable role evidence."
+            );
+          const covered = new Set(roles.map((role) => role.OpportunityId));
+          for (const id of batch) coverage.set(id, covered.has(id));
+        })
+      );
+      const failures = results.flatMap((result) =>
+        result.status === "rejected" && result.reason instanceof WorkspaceError
+          ? [result.reason]
+          : []
+      );
+      const expired = failures.find((error) => error.status === 401);
+      if (expired) throw expired;
+      if (
+        failures.some((error) => error.status === 429 || error.status === 403)
+      )
+        break;
+    }
+    return coverage;
+  }
+
   async function pipeline(userId: string, today: string) {
     const amountAvailable = (await fields("Opportunity")).has("Amount");
     const rows = await opportunities("OwnerId = '" + userId + "'");
     const ids = [...new Set(rows.map((row) => row.AccountId).filter(recordId))];
     const names = new Map<string, string>();
-    const [health, namesResult] = await Promise.all([
-      evidence(ids, today),
+    const [coverage, namesResult] = await Promise.all([
+      opportunityCoverage(rows.map((row) => row.Id).filter(recordId)),
       (async () => {
         for (const batch of chunks(ids, 100)) {
           const scope = batch.map((id) => "'" + id + "'").join(",");
@@ -480,16 +520,14 @@ export function workspace(
     return {
       today,
       amountAvailable,
+      healthScope: "opportunity" as const,
       accountWarning: namesResult
         ? "Some Salesforce account names could not be loaded."
         : undefined,
       rows: rows.map((row) => ({
         ...row,
         accountName: row.AccountId ? names.get(row.AccountId) : undefined,
-        health:
-          row.AccountId && names.has(row.AccountId)
-            ? health.get(row.AccountId)
-            : undefined
+        health: opportunityHealth(row.CloseDate, coverage.get(row.Id), today)
       }))
     };
   }

@@ -1,3 +1,4 @@
+import { opportunityHealth } from "../server/opportunity-health";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useRead } from "./api";
@@ -5,6 +6,7 @@ import { Pipeline, ReadError } from "./PipelineView";
 import { Snapshot } from "./Snapshot";
 import {
   accountDisplayName,
+  decodePipeline,
   type PipelineData,
   type SnapshotData
 } from "./pipeline";
@@ -33,7 +35,7 @@ function snapshotWithDate<T extends SnapshotData>(
 }
 
 function Workspace() {
-  const pipeline = useRead<PipelineData>("/api/pipeline");
+  const pipeline = useRead<PipelineData>("/api/pipeline", decodePipeline);
   const [selected, setSelected] = useState<string>();
   const [selectionUnavailable, setSelectionUnavailable] = useState(false);
   const [follow, setFollow] = useState<{ id: string }>();
@@ -139,7 +141,18 @@ function Workspace() {
           if (action.kind === "closeDate") {
             pipeline.updateCached((data) => ({
               ...data,
-              rows: withCloseDate(data.rows, action)
+              rows: withCloseDate(data.rows, action).map((row) => {
+                if (row.Id !== action.opportunityId) return row;
+                const codes = row.health?.reasonCodes;
+                const covered =
+                  !codes || codes.includes("unknownDecisionMaker")
+                    ? undefined
+                    : !codes.includes("missingDecisionMaker");
+                return {
+                  ...row,
+                  health: opportunityHealth(action.date, covered, data.today)
+                };
+              })
             }));
             account.updateCached((data) => snapshotWithDate(data, action));
             if (notifications.isCurrent(scope))

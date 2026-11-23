@@ -343,7 +343,7 @@ export function createApp({
     return session.profile;
   }
 
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => new Date(now()).toISOString().slice(0, 10);
   app.get(
     "/api/session",
     readRoute(async (_req, service, session) => {
