@@ -9,9 +9,15 @@ import {
 import {
   accountDisplayName,
   activeDimensions,
+  closeDateMax,
+  closeDateMin,
+  editCloseDates,
+  emptyCloseDates,
   healthCounts,
   pageSize,
   emptyFilters,
+  healthReasonOptions,
+  resetCloseDates,
   excludingFilters,
   healthLabels,
   healthReasonLabels,
@@ -101,6 +107,15 @@ export function Pipeline({
   const [explained, setExplained] = useState<string>();
   const filtersButton = useRef<HTMLButtonElement>(null);
   const [filters, setFilters] = useState(emptyFilters);
+  const [closeDates, setCloseDates] = useState(emptyCloseDates);
+  const [editingDate, setEditingDate] = useState<"from" | "through">();
+  const dateError = (key: "from" | "through") =>
+    editingDate === key && closeDates.badInput[key]
+      ? undefined
+      : closeDates.errors[key];
+  const fromError = dateError("from");
+  const throughError = dateError("through");
+  const showDateErrors = Boolean(fromError || throughError);
   const [sort, setSort] = useState<{ key: SortKey; ascending: boolean }>({
     key: "CloseDate",
     ascending: true
@@ -116,9 +131,17 @@ export function Pipeline({
     [data.rows]
   );
   const effectiveFilters = useMemo(
-    () =>
-      data.amountAvailable ? filters : { ...filters, minimum: "", maximum: "" },
-    [data.amountAvailable, filters]
+    () => ({
+      ...(data.amountAvailable
+        ? filters
+        : { ...filters, minimum: "", maximum: "" }),
+      ...closeDates.applied
+    }),
+    [data.amountAvailable, filters, closeDates.applied]
+  );
+  const reasonOptions = useMemo(
+    () => healthReasonOptions(data.rows, filters.reason),
+    [data.rows, filters.reason]
   );
   const effectiveSort =
     !data.amountAvailable && sort.key === "Amount"
@@ -167,11 +190,18 @@ export function Pipeline({
       region.scrollTop += rowBounds.bottom - bounds.bottom;
   }, [follow, selected, selectedIndex, page]);
 
-  function filter(key: keyof typeof filters, value: string) {
+  function restartFilteredPage() {
     onLeaveFollow();
-    setFilters((current) => ({ ...current, [key]: value }));
     setPage(0);
     if (tableRegion.current) tableRegion.current.scrollTop = 0;
+  }
+  function filter(key: keyof typeof filters, value: string) {
+    setFilters((current) => ({ ...current, [key]: value }));
+    restartFilteredPage();
+  }
+  function clearFilters() {
+    setFilters(emptyFilters);
+    setCloseDates(resetCloseDates);
   }
   function changePage(page: number, resetScroll = true) {
     if (resetScroll && tableRegion.current) tableRegion.current.scrollTop = 0;
@@ -206,17 +236,49 @@ export function Pipeline({
       </label>
     );
   }
-  function inputFilter(
-    key: "from" | "through" | "minimum" | "maximum",
-    label: string,
-    type: "date" | "number"
-  ) {
+  function closeDateInput(key: "from" | "through", label: string) {
+    const error = dateError(key);
+    const errorId = "pipeline-close-" + key + "-error";
+    return (
+      <label key={key + "-" + closeDates.revision}>
+        {label}
+        <input
+          type="date"
+          min={closeDateMin}
+          max={closeDateMax}
+          value={closeDates.draft[key]}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={
+            error ? errorId + " pipeline-close-feedback" : undefined
+          }
+          onFocus={() => setEditingDate(key)}
+          onBlur={() => setEditingDate(undefined)}
+          onInput={(event) => {
+            const input = event.currentTarget;
+            const next = editCloseDates(
+              closeDates,
+              key,
+              input.value,
+              input.validity.badInput
+            );
+            setCloseDates(next);
+            if (
+              next.applied.from !== closeDates.applied.from ||
+              next.applied.through !== closeDates.applied.through
+            )
+              restartFilteredPage();
+          }}
+        />
+      </label>
+    );
+  }
+  function amountInput(key: "minimum" | "maximum", label: string) {
     return (
       <label>
         {label}
         <input
-          type={type}
-          step={type === "number" ? "any" : undefined}
+          type="number"
+          step="any"
           value={filters[key]}
           onChange={(event) => filter(key, event.target.value)}
         />
@@ -315,13 +377,13 @@ export function Pipeline({
         </legend>
         {selectFilter("stage", "Stage", stages)}
         <div className="filter-range">
-          {inputFilter("from", "Close from", "date")}
-          {inputFilter("through", "Close through", "date")}
+          {closeDateInput("from", "Close from")}
+          {closeDateInput("through", "Close through")}
         </div>
         {data.amountAvailable ? (
           <div className="filter-range">
-            {inputFilter("minimum", "Min amount", "number")}
-            {inputFilter("maximum", "Max amount", "number")}
+            {amountInput("minimum", "Min amount")}
+            {amountInput("maximum", "Max amount")}
           </div>
         ) : null}
         {selectFilter("health", "Health", [
@@ -330,11 +392,27 @@ export function Pipeline({
           "Red",
           "Unavailable"
         ])}
-        {selectFilter(
-          "reason",
-          "Health reason",
-          Object.keys(healthReasonLabels)
-        )}
+        {selectFilter("reason", "Health reason", reasonOptions)}
+        <div
+          role="status"
+          className={showDateErrors ? "date-filter-error" : "visually-hidden"}
+        >
+          {fromError && (
+            <span id="pipeline-close-from-error">From: {fromError}</span>
+          )}
+          {throughError && (
+            <span id="pipeline-close-through-error">
+              Through: {throughError}
+            </span>
+          )}
+          {showDateErrors && (
+            <span id="pipeline-close-feedback">
+              {closeDates.applied.from || closeDates.applied.through
+                ? "Last valid range still applied."
+                : "No date range applied."}
+            </span>
+          )}
+        </div>
         <div className="filter-help">
           <small>Filters apply as you change them.</small>
           {!data.amountAvailable && (
@@ -344,7 +422,7 @@ export function Pipeline({
           )}
         </div>
       </fieldset>
-      {(dimensions.length > 0 || filters.search) && (
+      {(dimensions.length > 0 || filters.search || showDateErrors) && (
         <div
           className="active-filters"
           role="group"
@@ -363,6 +441,7 @@ export function Pipeline({
                     : filtersButton.current;
                 if (next instanceof HTMLElement) next.focus();
                 onLeaveFollow();
+                if (keys.includes("from")) setCloseDates(resetCloseDates);
                 setFilters((current) => ({
                   ...current,
                   ...Object.fromEntries(keys.map((key) => [key, ""]))
@@ -378,7 +457,7 @@ export function Pipeline({
             onClick={() => {
               filtersButton.current?.focus();
               onLeaveFollow();
-              setFilters(emptyFilters);
+              clearFilters();
               setPage(0);
             }}
           >
@@ -406,7 +485,7 @@ export function Pipeline({
           <button
             className="quiet"
             onClick={() => {
-              setFilters(emptyFilters);
+              clearFilters();
               onFollow(filteredSelection.Id);
             }}
           >

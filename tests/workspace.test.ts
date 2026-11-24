@@ -10,9 +10,13 @@ import { workspace, WorkspaceError, recordId } from "../server/workspace";
 import {
   accountDisplayName,
   activeDimensions,
+  editCloseDates,
+  emptyCloseDates,
   emptyFilters,
   excludingFilters,
   healthCounts,
+  healthReasonOptions,
+  resetCloseDates,
   pipelinePage,
   decodePipeline,
   selectRows,
@@ -1230,4 +1234,113 @@ test("a current Pipeline contract rejects malformed assessments before deriving 
       }),
     /invalid Pipeline data/
   );
+});
+
+test("Pipeline date drafts accept Salesforce bounds and keep the applied range on invalid edits", () => {
+  const lower = editCloseDates(emptyCloseDates, "from", "1700-01-01", false);
+  assert.deepEqual(lower.applied, { from: "1700-01-01", through: "" });
+  const bounded = editCloseDates(lower, "through", "4000-12-31", false);
+  assert.deepEqual(bounded.applied, {
+    from: "1700-01-01",
+    through: "4000-12-31"
+  });
+  for (const value of [
+    "10000-01-01",
+    "2026-2-01",
+    "2026-02-30",
+    "1699-12-31",
+    "4001-01-01"
+  ]) {
+    for (const endpoint of ["from", "through"] as const) {
+      const invalid = editCloseDates(bounded, endpoint, value, false);
+      assert.equal(invalid.draft[endpoint], value);
+      assert.ok(invalid.errors[endpoint]);
+      assert.equal(invalid.applied, bounded.applied);
+    }
+  }
+  const incomplete = editCloseDates(bounded, "from", "", true);
+  assert.ok(incomplete.errors.from);
+  assert.equal(incomplete.applied, bounded.applied);
+  const cleared = editCloseDates(incomplete, "from", "", false);
+  assert.deepEqual(cleared.applied, { from: "", through: "4000-12-31" });
+  const reset = resetCloseDates(incomplete);
+  assert.deepEqual(reset.draft, emptyCloseDates.draft);
+  assert.deepEqual(reset.applied, emptyCloseDates.applied);
+  assert.deepEqual(reset.errors, {});
+  assert.deepEqual(reset.badInput, emptyCloseDates.badInput);
+  assert.notEqual(reset.revision, incomplete.revision);
+});
+
+test("Pipeline holds a reversed draft while chips and inclusive results use the applied dates", () => {
+  const from = editCloseDates(emptyCloseDates, "from", today, false);
+  const equal = editCloseDates(from, "through", today, false);
+  const reversed = editCloseDates(equal, "through", "2026-11-20", false);
+  assert.ok(reversed.errors.through);
+  const filters = { ...emptyFilters, ...reversed.applied };
+  assert.equal(
+    activeDimensions(filters)[0]?.value,
+    `From ${today} · Through ${today}`
+  );
+  const rows = ["2026-11-20", today, "2026-11-22", "2026-11-99"].map(
+    (CloseDate, i) => ({
+      ...sampleOpportunity,
+      Id: String(i),
+      CloseDate
+    })
+  );
+  assert.deepEqual(
+    selectRows(rows, filters, closeSort).map((row) => row.Id),
+    ["1"]
+  );
+  const blankThrough = editCloseDates(reversed, "through", "", false);
+  assert.deepEqual(
+    selectRows(
+      rows,
+      { ...emptyFilters, ...blankThrough.applied },
+      closeSort
+    ).map((row) => row.Id),
+    ["1", "2"]
+  );
+});
+
+test("Health reason choices use full Pipeline evidence and retain only the selected missing exception", () => {
+  const normal = ["overdue", "closingSoon", "missingDecisionMaker"];
+  const date = {
+    ...sampleOpportunity,
+    Id: "missing-date",
+    health: opportunityHealth(undefined, true, today)
+  };
+  const role = {
+    ...sampleOpportunity,
+    Id: "unknown-role",
+    health: opportunityHealth("2026-12-31", undefined, today)
+  };
+  assert.deepEqual(healthReasonOptions([], ""), normal);
+  assert.deepEqual(healthReasonOptions([date], ""), [
+    ...normal,
+    "unknownCloseDate"
+  ]);
+  assert.deepEqual(healthReasonOptions([role], ""), [
+    ...normal,
+    "unknownDecisionMaker"
+  ]);
+  const loaded = [role, date];
+  assert.deepEqual(
+    selectRows(
+      loaded,
+      { ...emptyFilters, search: "no matching opportunity" },
+      closeSort
+    ),
+    []
+  );
+  assert.deepEqual(healthReasonOptions(loaded, ""), [
+    ...normal,
+    "unknownCloseDate",
+    "unknownDecisionMaker"
+  ]);
+  assert.deepEqual(healthReasonOptions([], "unknownDecisionMaker"), [
+    ...normal,
+    "unknownDecisionMaker"
+  ]);
+  assert.deepEqual(healthReasonOptions([], "overdue"), normal);
 });

@@ -610,6 +610,14 @@ main {
 .filter-range input[type="date"] {
   width: 110px;
 }
+.date-filter-error {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: #852636;
+  font-size: 0.82rem;
+}
 .filter-help {
   flex-basis: 100%;
   display: flex;

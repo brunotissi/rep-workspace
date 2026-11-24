@@ -1,4 +1,5 @@
 import type { OpportunityReason } from "../server/opportunity-health";
+import { calendarDay } from "../server/calendar";
 import { ApiError } from "./api";
 import type { workspace } from "../server/workspace";
 
@@ -36,6 +37,70 @@ export const healthReasonLabels = {
   unknownCloseDate: "Close date unavailable",
   unknownDecisionMaker: "Decision Maker coverage unavailable"
 } satisfies Partial<Record<OpportunityReason, string>>;
+
+export function healthReasonOptions(rows: Row[], selected: string) {
+  const available = new Set(rows.flatMap((row) => row.health.reasonCodes));
+  return (Object.keys(healthReasonLabels) as OpportunityReason[]).filter(
+    (reason) =>
+      (reason !== "unknownCloseDate" && reason !== "unknownDecisionMaker") ||
+      reason === selected ||
+      available.has(reason)
+  );
+}
+
+export const closeDateMin = "1700-01-01";
+export const closeDateMax = "4000-12-31";
+type DateEndpoint = "from" | "through";
+type DateRange = Pick<typeof emptyFilters, DateEndpoint>;
+
+export const emptyCloseDates = {
+  draft: { from: "", through: "" },
+  applied: { from: "", through: "" },
+  badInput: { from: false, through: false },
+  errors: {} as Partial<DateRange>,
+  revision: 0
+};
+
+export function resetCloseDates(state: typeof emptyCloseDates) {
+  return { ...emptyCloseDates, revision: state.revision + 1 };
+}
+
+export function editCloseDates(
+  state: typeof emptyCloseDates,
+  endpoint: DateEndpoint,
+  value: string,
+  incomplete: boolean
+) {
+  const draft = { ...state.draft, [endpoint]: value };
+  const badInput = { ...state.badInput, [endpoint]: incomplete };
+  const errors: Partial<DateRange> = {};
+  for (const key of ["from", "through"] as const) {
+    const date = draft[key];
+    if (badInput[key]) errors[key] = "Complete the date.";
+    else if (
+      /^\d{4,}-\d{2}-\d{2}$/.test(date) &&
+      (date.length > 10 || date < closeDateMin || date > closeDateMax)
+    )
+      errors[key] = "Use a year from 1700 to 4000.";
+    else if (date && !Number.isFinite(calendarDay(date)))
+      errors[key] = "Enter a valid date.";
+  }
+  if (
+    !errors.from &&
+    !errors.through &&
+    draft.from &&
+    draft.through &&
+    draft.from > draft.through
+  )
+    errors[endpoint] = "From must be on or before Through.";
+  return {
+    ...state,
+    draft,
+    badInput,
+    errors,
+    applied: errors.from || errors.through ? state.applied : draft
+  };
+}
 
 export function accountDisplayName(name: string) {
   return name.replace(
@@ -122,6 +187,7 @@ function filterChecks(filters: typeof emptyFilters) {
       matches: (row) =>
         Boolean(
           row.CloseDate &&
+          Number.isFinite(calendarDay(row.CloseDate)) &&
           (!from || row.CloseDate >= from) &&
           (!through || row.CloseDate <= through)
         )
