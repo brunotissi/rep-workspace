@@ -407,16 +407,83 @@ test("role action creates, updates, or leaves an already-correct record alone", 
   assert.equal(unchanged.writes.length, 0);
 });
 
-test("concurrent duplicate submit does not reach Salesforce", async () => {
-  let finish!: (response: Response) => void;
-  const hold = new Promise<Response>((resolve) => {
-    finish = resolve;
+for (const [label, action, recordId] of [
+  ["Task", task, taskId],
+  ["Contact Role", role, roleId]
+] as const) {
+  test(`concurrent duplicate ${label} submits reach Salesforce only once`, async () => {
+    let entered!: () => void;
+    let finish!: (response: Response) => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const hold = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const { service, writes } = fixture({
+      write: () => {
+        entered();
+        return hold;
+      }
+    });
+    const first = performAction(service, userId, action);
+    try {
+      await Promise.race([
+        started,
+        first.then(
+          () => {
+            assert.fail(
+              `The first ${label} action completed before reaching the mock write gate.`
+            );
+          },
+          (cause: unknown) => {
+            throw new Error(
+              `The first ${label} action failed before reaching the mock write gate.`,
+              { cause }
+            );
+          }
+        )
+      ]);
+      await assert.rejects(performAction(service, userId, action), {
+        status: 409
+      });
+      assert.equal(writes.length, 1);
+    } finally {
+      finish(Response.json({ success: true, id: recordId }, { status: 201 }));
+      await Promise.allSettled([first]);
+    }
+    await first;
+    assert.equal(writes.length, 1);
   });
-  const { service, writes } = fixture({ write: () => hold });
-  const first = performAction(service, userId, task);
-  await assert.rejects(performAction(service, userId, task), { status: 409 });
-  finish(Response.json({ success: true, id: taskId }, { status: 201 }));
-  await first;
+}
+
+test("a committed close-date write with a lost acknowledgement reconciles and a replay does not write again", async () => {
+  const options: Fixture = {
+    currentClose: close.previousDate,
+    write: () => {
+      options.currentClose = close.date;
+      throw new Error("Synthetic upstream disconnect");
+    }
+  };
+  const { service, writes } = fixture(options);
+  await assert.rejects(
+    performAction(service, userId, close),
+    (error: unknown) =>
+      error instanceof WorkspaceError &&
+      error.status === 502 &&
+      error.uncertain &&
+      !error.message.includes("Synthetic upstream disconnect")
+  );
+  const reopened = await service.requireOpenOpportunity(
+    userId,
+    accountId,
+    opportunityId,
+    true
+  );
+  assert.equal(reopened.CloseDate, close.date);
+  assert.deepEqual(await performAction(service, userId, close), {
+    message: "Close date is already saved."
+  });
   assert.equal(writes.length, 1);
 });
 

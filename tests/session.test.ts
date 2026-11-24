@@ -362,3 +362,311 @@ test("an in-flight identity read cannot publish a logged-out session's result", 
     browser.close();
   }
 });
+
+test("Pipeline HTTP sanitizes quota and continuation failures and recovers without partial rows", async () => {
+  let mode: "quota429" | "quota403" | "continuation" | "ok" = "quota429";
+  let mutations = 0;
+  const privateText =
+    "synthetic private upstream body SELECT Id FROM Opportunity";
+  const cursor = "/services/data/v68.0/query/f3-next";
+  const transport: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/token")) return tokenResponse("alice");
+    if (init?.method && init.method !== "GET") {
+      mutations++;
+      throw new Error("Unexpected mutation");
+    }
+    if (url.pathname.endsWith("/userinfo"))
+      return Response.json({
+        user_id: users.alice,
+        preferred_username: "alice"
+      });
+    if (url.pathname.endsWith("/describe"))
+      return Response.json({
+        queryable: true,
+        fields: [{ name: "CloseDate" }]
+      });
+    if (url.pathname === cursor)
+      return Response.json(
+        [{ errorCode: "UNKNOWN_EXCEPTION", message: privateText }],
+        { status: 500 }
+      );
+    const sql = url.searchParams.get("q") ?? "";
+    if (sql.includes("FROM Opportunity WHERE")) {
+      if (mode === "quota429" || mode === "quota403")
+        return Response.json(
+          [
+            {
+              errorCode:
+                mode === "quota403" ? "REQUEST_LIMIT_EXCEEDED" : "OTHER",
+              message: privateText
+            }
+          ],
+          { status: mode === "quota403" ? 403 : 429 }
+        );
+      const row = {
+        Id: opportunity,
+        Name: "Synthetic renewal",
+        CloseDate: "2026-11-15"
+      };
+      return mode === "continuation"
+        ? Response.json({ records: [row], done: false, nextRecordsUrl: cursor })
+        : page([row]);
+    }
+    if (sql.includes("FROM OpportunityContactRole")) return page();
+    throw new Error("Unexpected mock route");
+  };
+  const browser = await local(
+    createApp({
+      ...client,
+      transport,
+      now: () => Date.parse("2026-11-24T00:00:00Z")
+    })
+  );
+  try {
+    const { cookie } = await browser.login("alice");
+    for (const failure of ["quota429", "quota403", "continuation"] as const) {
+      mode = failure;
+      const response = await browser.send("/api/pipeline", cookie);
+      assert.equal(response.status, failure === "continuation" ? 502 : 429);
+      assert.deepEqual(JSON.parse(response.body), {
+        error:
+          failure === "continuation"
+            ? "Salesforce could not load this information."
+            : "The Salesforce API limit was reached. Try again later.",
+        uncertain: false
+      });
+    }
+    mode = "ok";
+    const recovered = await browser.send("/api/pipeline", cookie);
+    assert.equal(recovered.status, 200);
+    assert.deepEqual(
+      decodePipeline(JSON.parse(recovered.body)).rows.map((row) => row.Id),
+      [opportunity]
+    );
+    assert.equal(mutations, 0);
+  } finally {
+    browser.close();
+  }
+});
+
+test("Snapshot HTTP partial reads preserve known overdue evidence without inventing activity or role absence", async () => {
+  let failure: "Contact" | "Task" | "Event" | "Role" = "Contact";
+  let mutations = 0;
+  const transport: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/token")) return tokenResponse("alice");
+    if (init?.method && init.method !== "GET") {
+      mutations++;
+      throw new Error("Unexpected mutation");
+    }
+    if (url.pathname.endsWith("/userinfo"))
+      return Response.json({
+        user_id: users.alice,
+        preferred_username: "alice"
+      });
+    if (url.pathname.endsWith("/describe"))
+      return Response.json({
+        queryable: true,
+        fields: [
+          "CloseDate",
+          "AccountId",
+          "ActivityDate",
+          "Subject",
+          "Title"
+        ].map((name) => ({ name }))
+      });
+    const sql = url.searchParams.get("q") ?? "";
+    if (
+      sql.includes(
+        "FROM " +
+          (failure === "Role" ? "OpportunityContactRole" : failure) +
+          " "
+      )
+    )
+      return Response.json(
+        [
+          {
+            errorCode: "INVALID_FIELD",
+            message: "Synthetic private query text"
+          }
+        ],
+        { status: 400 }
+      );
+    if (sql.includes("FROM Account"))
+      return page([{ Id: account, Name: "Synthetic account" }]);
+    if (sql.includes("MIN(CloseDate)"))
+      return page([
+        { AccountId: account, openCount: 1, nearestClose: "2026-11-15" }
+      ]);
+    if (sql.includes("FROM Opportunity WHERE")) {
+      const overdue = {
+        Id: opportunity,
+        Name: "Synthetic renewal",
+        AccountId: account,
+        CloseDate: "2026-11-15"
+      };
+      return page(
+        sql.includes("ORDER BY Id") && sql.includes("OwnerId")
+          ? [
+              overdue,
+              {
+                ...overdue,
+                Id: otherOpportunity,
+                Name: "Later renewal",
+                CloseDate: "2026-12-15"
+              }
+            ]
+          : [overdue]
+      );
+    }
+    return page();
+  };
+  const browser = await local(
+    createApp({
+      ...client,
+      transport,
+      now: () => Date.parse("2026-11-24T00:00:00Z")
+    })
+  );
+  try {
+    const { cookie } = await browser.login("alice");
+    for (const missing of ["Contact", "Task", "Event", "Role"] as const) {
+      failure = missing;
+      const response = await browser.send(
+        "/api/accounts/" + account + "?opportunity=" + opportunity,
+        cookie
+      );
+      assert.equal(response.status, 200);
+      assert.doesNotMatch(
+        response.body,
+        /Synthetic private query text|INVALID_FIELD|test-secret|alice-refresh/
+      );
+      const snapshot = JSON.parse(response.body);
+      assert.equal(snapshot.account.Id, account);
+      assert.equal(snapshot.opportunities.data[0].Id, opportunity);
+      assert.equal(snapshot.health.data.status, "Red");
+      assert.match(snapshot.health.data.reasons.join(" "), /overdue/);
+      if (missing === "Role") {
+        assert.equal(snapshot.selectedDecisionMaker, undefined);
+        assert.equal(snapshot.selectedDecisionMakerIds, undefined);
+        assert.doesNotMatch(
+          snapshot.health.data.reasons.join(" "),
+          /No decision-maker role is visible/
+        );
+        assert.ok(
+          !snapshot.actions.items.some(
+            (item: { kind: string }) => item.kind === "contactRole"
+          )
+        );
+      } else {
+        const section =
+          snapshot[
+            ({ Contact: "contacts", Task: "tasks", Event: "events" } as const)[
+              missing
+            ]
+          ];
+        assert.deepEqual(section, {
+          error:
+            "This information is unavailable with your Salesforce permissions."
+        });
+      }
+      if (missing === "Task" || missing === "Event") {
+        assert.equal(snapshot.health.data.activity, undefined);
+        assert.equal(snapshot.actions.followUp.activity, "unknown");
+        assert.equal(snapshot.actions.followUp.lookup, "skipped");
+        assert.ok(
+          !snapshot.actions.items.some(
+            (item: { kind: string }) => item.kind === "task"
+          )
+        );
+      }
+    }
+    const pipelineResponse = await browser.send("/api/pipeline", cookie);
+    assert.equal(pipelineResponse.status, 200);
+    const pipeline = decodePipeline(JSON.parse(pipelineResponse.body));
+    assert.deepEqual(
+      pipeline.rows.map((row) => row.health.reasonCodes),
+      [["overdue", "unknownDecisionMaker"], ["unknownDecisionMaker"]]
+    );
+    assert.equal(pipeline.rows[0].health.status, "Red");
+    assert.equal(pipeline.rows[1].health.unassessed, true);
+    assert.equal(mutations, 0);
+  } finally {
+    browser.close();
+  }
+});
+
+test("Pipeline allowed empty scope and a subsequently unavailable selection have distinct HTTP responses", async () => {
+  let available = false;
+  let mutations = 0;
+  const row = {
+    Id: opportunity,
+    Name: "Synthetic owned deal",
+    AccountId: account,
+    CloseDate: "2026-11-15"
+  };
+  const transport: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/token")) return tokenResponse("alice");
+    if (init?.method && init.method !== "GET") {
+      mutations++;
+      throw new Error("Unexpected mutation");
+    }
+    if (url.pathname.endsWith("/userinfo"))
+      return Response.json({
+        user_id: users.alice,
+        preferred_username: "alice"
+      });
+    if (url.pathname.endsWith("/describe"))
+      return Response.json({
+        queryable: true,
+        fields: ["AccountId", "CloseDate"].map((name) => ({ name }))
+      });
+    const sql = url.searchParams.get("q") ?? "";
+    if (sql.includes("FROM Opportunity WHERE")) {
+      assert.ok(sql.includes("OwnerId = '" + users.alice + "'"));
+      return page(available ? [row] : []);
+    }
+    if (sql.includes("FROM Account"))
+      return page([{ Id: account, Name: "Synthetic account" }]);
+    if (sql.includes("FROM OpportunityContactRole")) return page();
+    throw new Error("Unexpected mock route");
+  };
+  const browser = await local(
+    createApp({
+      ...client,
+      transport,
+      now: () => Date.parse("2026-11-24T00:00:00Z")
+    })
+  );
+  try {
+    const { cookie } = await browser.login("alice");
+    const empty = await browser.send("/api/pipeline", cookie);
+    assert.equal(empty.status, 200);
+    assert.deepEqual(decodePipeline(JSON.parse(empty.body)).rows, []);
+
+    available = true;
+    const loaded = await browser.send("/api/pipeline", cookie);
+    assert.equal(loaded.status, 200);
+    assert.deepEqual(
+      decodePipeline(JSON.parse(loaded.body)).rows.map((record) => record.Id),
+      [opportunity]
+    );
+
+    available = false;
+    const selection = await browser.send(
+      "/api/accounts/" + account + "?opportunity=" + opportunity,
+      cookie
+    );
+    assert.equal(selection.status, 404);
+    assert.deepEqual(JSON.parse(selection.body), {
+      error:
+        "The selected account or opportunity is unavailable in your pipeline.",
+      uncertain: false
+    });
+    assert.equal(mutations, 0);
+  } finally {
+    browser.close();
+  }
+});
