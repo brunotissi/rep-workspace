@@ -1,130 +1,83 @@
-# Read-only workspace
+# Local setup and operations
 
-Restart with `npm.cmd run dev` and open `http://localhost:5173`. Sign in through the External Client App as the Salesforce user who owns the demo opportunities. The workspace shows open opportunities owned by that user. Selecting an opportunity opens its account snapshot, including other open opportunities the same Salesforce session can read.
+## Prerequisites
 
-## Account health
+Use a Salesforce Developer Edition org, Git, Node.js 24 with its bundled npm, and a current Salesforce CLI (`sf`). Use **Windows PowerShell 5.1 or later** for the seed and offline seed tests. The current benchmark used Node.js 26.13.1 on Windows. Reserve localhost port 5173. The browser application and Salesforce CLI authenticate separately.
 
-Health reflects the current user's Salesforce visibility. Close-date and activity cutoff rules use the server's UTC date. Activities are completed tasks and past events associated with the account. Decision-maker coverage comes from visible `Decision Maker` roles on open opportunities.
+## Configure Salesforce OAuth
 
-| Health | Rule                                                                                                                                                                                                                               |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Red    | A visible open opportunity is overdue, or visible activity exists and all known activity is at least 21 days old. Stale activity requires both recent-activity queries to succeed.                                                 |
-| Amber  | No Red condition applies and at least one signal needs attention. Examples include a close date from today through seven days out, no visible open opportunities, no visible activity or decision maker, or an unavailable signal. |
-| Green  | Recent activity, readable open pipeline, closest close date more than seven days away, and visible decision-maker coverage.                                                                                                        |
+In Salesforce Setup, open **External Client App Manager** and create a local External Client App, or edit an existing one. Enable OAuth and configure the **OAuth 2.0 Web Server Flow** (authorization code), with callback URL `http://localhost:5173/auth/callback`. Require PKCE. The server sends the consumer secret for both code exchange and refresh, so it supports the corresponding secret requirements. Select these scopes:
 
-An incomplete health calculation displays a text label and explains which signals are unavailable. The app distinguishes an empty successful read from a failed read. An individual snapshot section can fail while the rest remains usable. Salesforce formats the displayed amount in the authorized user's locale. Sorts and range filters operate on the raw record amounts, with no exchange-rate conversion.
+| Salesforce scope               | Requested value                                    |
+| ------------------------------ | -------------------------------------------------- |
+| Manage user data via APIs      | `api`                                              |
+| Perform requests at any time   | `refresh_token` (also shown with `offline_access`) |
+| Access unique user identifiers | `openid`                                           |
 
-## Verification
+For a controlled demo, use **Admin approved users are pre-authorized** under the app's OAuth policy and authorize the admin and restricted rep through the appropriate profile or permission-set assignments. Confirm API Enabled for both identities and that the refresh policy allows an eligible token during the demo. Keep the org's sharing, session and IP policies in place. [Salesforce OAuth scopes](https://help.salesforce.com/s/articleView?id=remoteaccess_oauth_tokens_scopes.htm&language=en_US) · [External Client App settings](https://help.salesforce.com/s/articleView?id=xcloud.configure_external_client_app_oauth_settings.htm&language=en_US)
 
-1. In the pipeline, sort Stage, Close date, Amount, and Health in both directions. Apply stage, date, amount and health filters, clear them, and use Previous and Next. Confirm a filter with no possible matches shows an empty result.
-2. Tab to an opportunity and press Enter or Space. Confirm the selection, account name and owner update. Check the health explanation, overdue labels, contacts, and activity timeline.
-3. After approved seed execution, confirm 1,080 demo opportunities in the rep's pipeline. In browser developer tools, reload and record the `/api/pipeline` duration and transferred bytes. Sort and filter with the Network tab open and confirm these controls add no Salesforce requests. The table renders up to 50 rows at a time and filtering and sorting cover the loaded result.
-4. Before restricted-user validation, sign out and confirm the pipeline is replaced by the sign-in screen. Use the later restricted-user setup to verify field visibility and access against the real org.
+From the repository root in PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+npm.cmd ci
+npm.cmd run dev
+```
+
+Before starting, put the generated consumer key in `SF_CLIENT_ID` and consumer secret in `SF_CLIENT_SECRET` in the local `.env` file. `SF_LOGIN_URL` defaults to `https://login.salesforce.com`; for an org requiring its own login domain, use the HTTPS Salesforce My Domain origin with no path. Keep `.env` private. Open **http://localhost:5173** and complete Salesforce sign-in in the browser. Restarting the process clears in-memory app sessions.
 
 ## Seed the scale-test dataset
 
-The script creates 30 accounts, 1,080 open opportunities, 60 contacts, 30 completed tasks, and 20 decision-maker roles. Each account gets 36 opportunities, two contacts, and one account-linked task. Opportunity currency is set explicitly and defaults to EUR. Use `-OpportunityCurrency` to choose another active ISO code, and use the same value for Apply and Verify. Salesforce multi-currency must be enabled, with the chosen currency active. On the anchor date each group has ten accounts:
-
-| Scenario | Closest close date | Completed task | Decision maker |
-| -------- | ------------------ | -------------- | -------------- |
-| Green    | 14 days out        | 3 days ago     | Yes            |
-| Amber    | 2 days out         | 8 days ago     | No             |
-| Red      | 5 days overdue     | 29 days ago    | Yes            |
-
-Run from the repository root. Set the target CLI alias and the exact username shown in the workspace. Keep the generated dataset ID and anchor date together for verification and recovery. Use a new ID for an independent dataset.
+Use a disposable org. Enable Multiple Currencies and confirm **EUR is active** under **Manage Currencies**. Enabling multiple currencies is a permanent org setting. Use an active seed owner and an authorized CLI account that can read and create Accounts, Opportunities, Contacts, Tasks and Opportunity Contact Roles. The org needs active open Opportunity stages, a closed Task status, a Task priority and an active `Decision Maker` role. [Salesforce multi-currency setup](https://help.salesforce.com/s/articleView?id=sales.admin_enable_multicurrency.htm&language=en_US)
 
 ```powershell
+sf org login web --alias rep-demo
 ./scripts/seed-demo.ps1 -Mode Plan
+
 $seed = @{
-  TargetOrg = '<CLI alias or username>'
-  OwnerUsername = '<exact username shown in Rep Workspace>'
-  DatasetId = [guid]::NewGuid()
-  AsOf = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
+  TargetOrg           = 'rep-demo'
+  OwnerUsername       = '<exact username used in the browser>'
+  DatasetId           = [guid]::NewGuid()
+  AsOf                = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
+  OpportunityCurrency = 'EUR'
 }
 $seed
-# After approval, run Apply once. Use the same values for any retry.
+# Save the exact values privately and verify the CLI org before Apply.
 ./scripts/seed-demo.ps1 @seed -Mode Apply
 ./scripts/seed-demo.ps1 @seed -Mode Verify
 ```
 
-The CLI resolves the target owner in the selected org and explicitly sets ownership on accounts, contacts, tasks and opportunities. IDs for relationships are read back from Salesforce. Reuse requires an exact dataset marker in the description, the expected key and relationships, and the correct owner. Roles are identified through their two verified parent records and role value. The script refuses conflicting keys, inserts only missing records, and verifies the results. Run one process per dataset. Each batch is atomic, while completed batches from a failed run can remain. Allow an in-flight request to finish before retrying. Custom org automation, record types and duplicate rules can affect inserts. The script has no delete mode because deleting an account can also delete records added outside the seed.
+**Apply creates Salesforce records.** It produces 30 Accounts, 1,080 open Opportunities, 60 Contacts, 30 completed Tasks and 20 Decision Maker roles. Plan uses no Salesforce access. Verify reads the named dataset without writing. Use the same tuple for repeat or recovery and run one process at a time. A failed batch stops the run. Earlier batches may have persisted, so inspect the outcome before resuming. The script checks seed keys and markers, inserts missing rows, and has no delete mode. A changed seeded Close Date can cause strict Verify to report drift. Choose a new dataset GUID only for a separate dataset.
 
-Verify is strict by default. An intentional demo edit to a seeded close date will cause it to report a mismatch against the original seed. Keep the original checkpoint and compare the exact Opportunity ID, original value, and approved new value with a read-only Salesforce query. Also recheck the open EUR count, owner, and relationships against the seed dataset. A separately created follow-up or contact role can be verified by its own ID. Use a new dataset GUID when you need a pristine seed for a repeatable demonstration.
+Sign into the app as the seeded owner. Pipeline includes all that owner's open Opportunities, so pre-existing sample records may add to the total. The seed's ten Green, ten Amber and ten Red groups describe **Account Health at the anchor date**. Pipeline Opportunity Health is calculated separately and changes with today's UTC date and visible evidence.
 
-## Verify the seeded dataset through the app
+## Set up and demonstrate the restricted rep
 
-Restart the app and sign in as the configured owner. The pipeline endpoint scopes rows to the signed-in rep and returns Opportunity Health. In DevTools, count records by the exact dataset marker and summarize the row assessments without printing record data:
+Create a separate user with the **Salesforce** license and **Minimum Access - Salesforce** profile. Assign a dedicated permission set with API Enabled, the External Client App assignment where policy requires it, and scoped read access. Use normal Salesforce invitation and password setup. Keep broad access and write grants out of the demo permission assignment.
 
-```js
-const dataset = "<dataset GUID from PowerShell>";
-const response = await fetch("/api/pipeline");
-if (!response.ok)
-  throw new Error("Pipeline request failed: " + response.status);
-const { rows } = await response.json();
-const seeded = rows.filter((row) =>
-  row.accountName?.startsWith("RW Demo " + dataset + " | ")
-);
-const counts = { Green: 0, Amber: 0, Red: 0, Unavailable: 0 };
-for (const { health } of seeded) {
-  counts[!health || health.unassessed ? "Unavailable" : health.status]++;
-}
-const accounts = new Set(seeded.map((row) => row.AccountId)).size;
-console.table({ opportunities: seeded.length, accounts, ...counts });
-if (seeded.length !== 1080 || accounts !== 30) {
-  throw new Error("Unexpected dataset size. Check ownership and visibility.");
-}
+| Object                             | Read access for this walkthrough                                                                                                                                                                                                               |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Opportunity                        | Open records it owns, with Name, Account, Stage and Close Date readable. Withhold Amount and Opportunity Edit.                                                                                                                                 |
+| Account and Contact                | Visible fixture Accounts, including Account name and owner, and their Contacts, including name, title and Account association. Sharing still applies.                                                                                          |
+| Task                               | Read only for fixture activity. Keep Subject, Due Date (`ActivityDate`) and Related To (`WhatId`) readable, along with Account (`AccountId`) and closed status (`IsClosed`) for the activity queries. Withhold Create, Edit and Delete.        |
+| Event and Opportunity Contact Role | Allow read of visible fixture evidence where supported. Event recency uses Account, Subject, `ActivityDateTime` and `EndDateTime`. Role coverage uses Opportunity, Contact and Role. Withhold Contact Role writes and parent Opportunity Edit. |
+
+Use a separate test Account with two open Opportunities owned by the restricted rep, a visible Contact, a completed Account-linked Task and one Decision Maker role on one Opportunity. Tune the dates relative to the current UTC day: one overdue, one later than seven days, and activity at least 21 days old if demonstrating stale activity. Use separate browser profiles for admin and rep. The rep should see only its own two Pipeline rows, Unavailable Amount, no Amount sort or filter, and permission explanations for applicable write actions. Admin and restricted sessions should remain independent. Activity and contact-role visibility depend on effective Salesforce access. Partial reads are surfaced without inventing missing business evidence.
+
+## Operate and verify
+
+- Search matches all normalized words across the combined Opportunity and displayed Account names. Filters apply locally, and date limits are inclusive. Dates outside 1700–4000 or a reversed draft range leave the last valid range applied. Table pages contain up to 50 rows.
+- Pipeline assesses each Opportunity. Snapshot independently assesses the Account and lists its visible open Opportunities read-only. Use the Pipeline to change selection.
+- A recommendation commits with one explicit submission after any required date or Contact entry. Treat an uncertain outcome as a cue to inspect the refreshed record before trying again. Successful and failed outcomes appear in notifications; cached background refreshes retain the workspace.
+- Run the following from the repository root. The tests use mocked Salesforce transport.
+
+```powershell
+npm.cmd test
+npm.cmd run typecheck
+npm.cmd run prettier:verify
+npm.cmd run build
+powershell.exe -NoProfile -File tests/seed-demo.test.ps1
+git diff --check
 ```
 
-Distributions depend on the business date, intentional fixture edits, and the viewer's permissions. Check health reasons on individual Pipeline rows and verify Account Health separately in Snapshot.
-
-For performance evidence, disable the browser cache in DevTools, reload three times, and record the pipeline request durations, median, and transferred bytes. Check responsiveness by changing a filter and moving between pages on the large dataset. Neither operation should add a pipeline request. Record the actual observations rather than treating the offline fixture as a live measurement.
-
-### Historical live performance (before Opportunity Health)
-
-The 1,080-opportunity EUR demo dataset was verified in the browser. Three measured application requests to `/api/pipeline` took **1.26 s, 1.23 s, and 1.12 s** (median **1.23 s**). Sorting, filtering, and paging remained responsive and sent zero additional pipeline requests. See the [current benchmark and follow-up](delivery.md#performance-comparison).
-
-## Next best actions
-
-The selected opportunity can show up to three recommendations. The app ranks an overdue close date first, then missing or stale completed account activity (using the same 21-day evidence as health), then missing visible decision-maker coverage on the selected opportunity. An existing open workspace follow-up suppresses a second follow-up recommendation. Unknown evidence suppresses that rule. Salesforce object and field permissions determine which controls and contacts are available.
-
-| Priority                     | Scope and trigger                                                                                                                                                          | Evidence and failure behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Required write access                                                                                                                                                                                     |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Update the close date     | Selected open Opportunity has a Close Date strictly before today (UTC).                                                                                                    | Reads Opportunity `Id` and `CloseDate`. An unreadable or missing date suppresses the recommendation.                                                                                                                                                                                                                                                                                                                                                                                                                       | Opportunity Edit, writable `CloseDate`, and an owned open record in the selected Account. The server checks the previous date before updating.                                                            |
-| 2. Create a follow-up task   | The Account has visible stale activity or no visible completed activity, and there is no visible open Task named `Rep Workspace follow-up` linked directly to the Account. | Completed Tasks use `AccountId`, `IsClosed`, and due date `ActivityDate` on or before today. Ended Events use `AccountId`, `EndDateTime`, and `ActivityDate`. A date newer than UTC today minus 21 days is recent. Stale requires two successful recent checks, no recent evidence, and older visible evidence. No activity requires complete empty checks. The open follow-up lookup uses `Id`, `WhatId`, `IsClosed`, and `Subject`. Missing recency evidence or a failed follow-up lookup suppresses the recommendation. | Task Create and writable `WhatId`, `Subject`, `ActivityDate`, `Status`, and `Priority`. The server loads an open Task status and an active Priority.                                                      |
-| 3. Identify a decision maker | A successful read finds no visible role with the exact value `Decision Maker` on the selected Opportunity.                                                                 | Reads `OpportunityContactRole.OpportunityId`, `ContactId`, and `Role`, scoped to visible open Opportunities on the Account. A failed role read suppresses the recommendation. No eligible Contact leaves the action unavailable.                                                                                                                                                                                                                                                                                           | Opportunity Edit, readable same-Account Contact, and either Contact Role Create with writable `OpportunityId`, `ContactId`, and `Role`, or Contact Role Update with writable `Role` for an existing pair. |
-
-Health is Account-level. An overdue visible Opportunity can make every row on that Account show **Needs attention**. **Incomplete data** records an unknown input. If missing evidence is the only reason the Account could not be classified, the UI shows **Not assessed**. An inaccessible Task due date is hidden from the activity list and contributes no recency evidence. Amount filters and sorting are unavailable when Salesforce hides the Amount field.
-
-The server checks the selected opportunity is open, belongs to the signed-in rep, and belongs to the selected account before writing. A contact must be visible and on that account. The role action updates an existing role for that contact or creates a Decision Maker role without changing the primary-contact flag. The date action compares the submitted previous date with Salesforce before saving. A single localhost process suppresses overlapping action requests for the same target. Salesforce still decides whether the write is allowed.
-
-Run `npm test` to exercise recommendation ordering, action validation, writes against simulated Salesforce responses, and optimistic close-date rollback. No live Salesforce writes are needed for these tests.
-
-The Pipeline previews a pending close date in place and keeps its original sort position until Salesforce confirms the write. After confirmation, it follows the selected row to its new page using the current sort and filters. If a criterion excludes the row, the selection stays open in the snapshot and the Pipeline offers to clear the search and filters and show the row. Search matches displayed Opportunity and Account names across the loaded data.
-
-For a browser review, start the workspace and select **Cobalt Payments - Field expansion 02** on a freshly seeded dataset. On the anchor date it shows all three recommendations if the permissions and related records are still in their original state. Use Tab to reach each card and confirm the selected context and available inputs. Each live submission requires org-write approval. After approval, verify the saved Task, Close Date, and Opportunity Contact Role in Salesforce and check that the corresponding recommendations refresh. A remote time-out may leave the outcome unknown, in which case review the refreshed record before taking the action again.
-
-### Deferred UX refinements
-
-- The desktop-first Pipeline uses a horizontally scrollable table on narrow screens and a fixed page size of 50.
-- Search matches a substring of the displayed Account or Opportunity name. View preferences reset when the workspace reloads.
-- The action area shows one toast at a time for the current selection. Switching records clears it, and the next result replaces it.
-
-## Restricted-user verification
-
-Use a separate full Salesforce user with the **Minimum Access - Salesforce** profile and a dedicated permission set. Grant API Enabled and access to the existing external client app under its current policy. Grant Opportunity, Account, and Contact read access with the fields the workspace needs. Leave Opportunity Amount hidden and Opportunity Edit withheld for the restricted demonstration. Use separate browser profiles so each OAuth session runs under its own Salesforce identity. Leave organization-wide sharing settings in place.
-
-Give the user a small, separately owned set of test Opportunities on a dedicated Account. The workspace requires an owned open Opportunity before opening its Account snapshot. Salesforce record sharing and field permissions still govern the account-wide supporting data within that view. If Task or Event reads are unavailable, the activity section reports partial data. Opportunity Contact Role reads depend on access to the Opportunity and Contact. Role writes also depend on Opportunity Edit and the applicable REST field permissions.
-
-Use keyboard Tab and Shift+Tab from the skip link, through search and the table, across the pager, and into the Snapshot and actions. Verify visible focus at the first and last page, and that the scrollable Snapshot lists can be reached and scrolled. Check that field errors are linked to their inputs, health remains clear without color, and toast announcements leave focus with the user. At a narrow viewport the Pipeline table scrolls within its panel.
-
-The local tests exercise mocked OAuth through the HTTP routes, including separate users and field permissions, token refresh and revocation, logout during an in-flight read, and forged cross-origin requests. Fault tests cover Salesforce quotas, record locks, partial reads, duplicate submissions, and uncertain saves without consuming API quota or changing live data. Separately verify real restricted-user field and write access in Salesforce after setup is approved.
-
-### Milestone 4 verification results
-
-The restricted user's browser showed two owned EUR Opportunities with Amount unavailable and write actions disabled. The Northstar Lab Snapshot displayed the completed Task on October 20, 2026. The administrator's Snapshot URL returned HTTP 404 in the restricted session. The follow-up lookup returned stale activity and no existing follow-up after adding read-only access to Task Due Date and Related To.
-
-One direct Salesforce REST PATCH used the restricted user's OAuth identity and attempted to change the disposable **Northstar Lab - Late renewal** Close Date from November 15 to December 15, 2026. Salesforce returned **HTTP 400 / `CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY`**. An administrator read confirmed the date remained November 15. The response establishes that Salesforce rejected the write. Separate effective-access checks confirmed that the user could read the Opportunity and Close Date and lacked update access.
-
-The authenticated Snapshot's follow-up diagnostic exposes the rule and lookup states, HTTP status, allowlisted Salesforce error codes, and recognized Task field names as available. It omits raw Salesforce messages, query text, credentials, and token data. A failed lookup suppresses the recommendation.
-
-Two manual accessibility checks remain outstanding: a screen-reader walkthrough of labels, errors, and toast announcements, and a narrow-viewport keyboard walkthrough of the table, pager, Snapshot lists, and action controls.
+See [architecture, evidence and demo](delivery.md) for the measured baseline and tested accessibility scope.

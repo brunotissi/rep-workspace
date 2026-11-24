@@ -1,11 +1,11 @@
-﻿# Rep Workspace
+# Rep Workspace
 
 A localhost Salesforce workspace for account executives. See an open pipeline, understand why a deal needs attention, and take action without leaving the page.
 
 ## Run it locally
 
-1. Use Node.js 24, Git, Salesforce CLI, and a Salesforce Developer Edition org.
-2. In Salesforce Setup, create or configure an External Client App with OAuth authorization code flow and PKCE. Set the callback to `http://localhost:5173/auth/callback`. Enable API access, OpenID identity, and refresh-token access. Allow the intended admin and restricted users under the app's OAuth policy.
+1. Use Node.js 24 with npm, Git, Salesforce CLI, Windows PowerShell for seeding, and a Salesforce Developer Edition org.
+2. In Salesforce Setup, create or configure an External Client App with OAuth authorization code flow and PKCE. Set the callback to `http://localhost:5173/auth/callback`. Enable API access, OpenID identity, and refresh-token access. Authorize the intended admin and restricted users under the app's OAuth policy. See the [setup guide](docs/read-workspace.md#configure-salesforce-oauth) for exact scopes and assignment.
 3. Copy `.env.example` to `.env`. Set `SF_CLIENT_ID` to the consumer key and `SF_CLIENT_SECRET` to the consumer secret. `SF_LOGIN_URL` defaults to the production login origin and can use your Salesforce My Domain. Keep the local file private.
 4. Run `npm ci`, then `npm run dev`. Open `http://localhost:5173` and sign in through the app. Salesforce CLI authentication is separate.
 
@@ -22,13 +22,13 @@ Run `npm test`, `npm run prettier:verify`, `npm run build`, and `git diff --chec
 
 ## Architecture and rules
 
-React and TypeScript handle selection, filters, and action drafts. Express holds OAuth tokens server-side and calls Salesforce REST with the signed-in user's authorization. The Pipeline starts from that rep's open Opportunities and batches related reads. Snapshot independently reads the selected account's visible evidence. Calculated assessments are never written to Salesforce.
+React and TypeScript handle selection, filters, and action drafts. Express holds OAuth tokens server-side and calls Salesforce REST with the signed-in user's authorization. The Pipeline starts from that rep's open Opportunities and batches related reads. Snapshot independently reads the selected account's visible evidence. Calculated assessments are never written to Salesforce. Each applicable recommendation has one submit action after any required date or Contact input. When no rule applies, the workspace shows a resolved state.
 
 - **Opportunity Health** is critical if overdue or due within seven calendar days with no visible Decision Maker. It is at risk for either near-term close or confirmed missing coverage alone, healthy only for a later close with visible coverage, and unavailable when missing inputs leave no confirmed risk.
 - **Account Health** combines activity recency, open pipeline, closest close date, and visible Decision Maker coverage on open deals. The existing 21-day activity and seven-day proximity rules are preserved. A failed evidence read cannot stand in for an empty successful result.
-- The server uses the UTC calendar day and Salesforce date-only values. [Detailed rules, verification, and performance](docs/delivery.md) cover precedence, permissions, and measurements.
+- Seven calendar days highlight deals due within a working week, and 21 days give a rep a clear follow-up cadence. UTC provides one reproducible date boundary for Salesforce date-only values. The layout is desktop-first for comparing deals across columns, with a responsive workspace at narrow widths. Local filtering avoids a network round trip per change, and 50-row pages keep rendered work bounded. Amount ranges assume comparable currencies. [Detailed rules and evidence](docs/delivery.md) cover precedence and permissions.
 
-On the earlier live 1,080-row build, three Pipeline requests had a **1.23 s median**. Under identical mocked upstream latency, this version completed in **232.9 ms** versus **179.7 ms** for the baseline, with 11 versus 8 upstream calls and under 0.9 ms for standalone filtering and sorting in Node. The extra lookup work buys deal-specific evidence. Repeat the live timing before comparing latency to the earlier org baseline.
+In five cache-disabled Chrome runs with **1,080 live Salesforce Opportunities**, Pipeline GET took **953 ms median / 1,529 ms maximum**. Across **45** local interactions, estimated time to paint was **33.4 ms median / 53.2 ms maximum**, with **zero additional Pipeline requests**. The localhost harness used the production app, live REST reads and controlled local session setup. It excluded OAuth sign-in time and estimated interaction timing with two animation-frame callbacks. This baseline predates the latest minor UI refinements. Batching related reads, local filtering and 50-row rendering kept work bounded.
 
 ## Native Salesforce migration
 
@@ -36,4 +36,4 @@ Place the cross-account workspace on a Lightning App Page and offer a compact LW
 
 ## Next steps
 
-Rerun the final build through separate live admin and restricted OAuth sessions, repeat the 1,080-row timing, and check keyboard and screen-reader announcements. Then capture the [3-5 minute demo](docs/delivery.md#demo-outline) and package the repository for submission.
+Validate timezone and refresh-date semantics with reps, then evaluate configurable thresholds based on their follow-up cadence. Before broader rollout, test larger pipelines and concurrent writes, then migrate supported record interactions to native Salesforce incrementally.
