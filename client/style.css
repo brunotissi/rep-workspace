@@ -340,6 +340,9 @@ main {
   gap: 12px;
   overflow: auto;
 }
+.actions-column {
+  display: contents;
+}
 @container (min-width: 520px) {
   .detail-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -347,7 +350,7 @@ main {
     overflow: hidden;
     padding: 0 2px 4px;
   }
-  .detail-grid > .next-actions {
+  .actions-column > .next-actions {
     overflow: auto;
     align-self: start;
     max-height: 100%;
@@ -540,6 +543,14 @@ main {
   min-height: 44px;
   padding-inline-start: 37px;
 }
+.pipeline-search input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+.filters input:enabled,
+.filters select:enabled {
+  border-color: #69767c;
+}
 .pipeline-search svg {
   position: absolute;
   top: 11px;
@@ -601,6 +612,12 @@ main {
 }
 .filter-help {
   flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+.filter-permission {
+  color: var(--muted);
 }
 .active-filters {
   margin-bottom: 6px;
@@ -1300,6 +1317,27 @@ small {
   border-color: #e8c7c5;
   border-left-color: #a22435;
   color: #852636;
+}
+@media (max-width: 960px) {
+  .actions-column {
+    display: flex;
+    flex-direction: column;
+    align-self: start;
+    min-width: 0;
+    gap: 12px;
+  }
+  .actions-column > .next-actions {
+    align-self: stretch;
+  }
+  .toast {
+    position: static;
+    width: 100%;
+    min-width: 0;
+    margin-block: 8px;
+  }
+  .actions-column > .toast {
+    margin-block: 0;
+  }
 }
 .toast-content {
   display: flex;

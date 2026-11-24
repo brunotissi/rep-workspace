@@ -192,19 +192,17 @@ function Workspace() {
           <h2 id="pipeline-title" className="visually-hidden" tabIndex={-1}>
             My pipeline
           </h2>
-          {pipeline.loading && (
-            <p className="notice" role="status">
-              {pipeline.data
-                ? "Refreshing your opportunities..."
-                : "Loading your opportunities..."}
-            </p>
-          )}
           {pipeline.loading && !pipeline.data && (
-            <div className="panel pipeline-skeleton" aria-hidden="true">
-              {Array.from({ length: 6 }, (_, index) => (
-                <span key={index} />
-              ))}
-            </div>
+            <>
+              <p className="notice" role="status">
+                Loading your opportunities...
+              </p>
+              <div className="panel pipeline-skeleton" aria-hidden="true">
+                {Array.from({ length: 6 }, (_, index) => (
+                  <span key={index} />
+                ))}
+              </div>
+            </>
           )}
           {pipeline.error && (
             <ReadError retry={pipeline.retry}>
@@ -271,11 +269,9 @@ function Workspace() {
               unavailable={selectionUnavailable}
             />
           )}
-          {account.loading && (
+          {account.loading && !account.data && (
             <p className="notice" role="status">
-              {account.data
-                ? "Refreshing account snapshot..."
-                : "Loading account snapshot..."}
+              Loading account snapshot...
             </p>
           )}
           {account.error && (
@@ -284,15 +280,18 @@ function Workspace() {
               {account.data && " Showing the last loaded snapshot."}
             </ReadError>
           )}
-          {pending && (
-            <p role="status" className="notice">
-              {preview
+          <p role="status" className="visually-hidden">
+            {pending
+              ? preview
                 ? "Saving the previewed close date..."
-                : "Saving to Salesforce..."}
-            </p>
-          )}
-          {account.data && active && (
-            <div className="detail-grid">
+                : "Saving to Salesforce..."
+              : (pipeline.loading && pipeline.data) ||
+                  (account.loading && account.data)
+                ? "Refreshing workspace data..."
+                : ""}
+          </p>
+          <div className="detail-grid">
+            {account.data && active && (
               <section
                 className="panel snapshot"
                 aria-labelledby="snapshot-title"
@@ -304,25 +303,29 @@ function Workspace() {
                 </div>
                 <Snapshot data={snapshotWithDate(account.data, preview)} />
               </section>
-              <NextActions
-                key={active.Id}
-                snapshot={account.data}
-                selected={active}
-                pending={pending}
-                blocked={blocked}
-                validation={validation}
-                onInputChange={(kind) =>
-                  setValidation((previous) =>
-                    previous?.kind === kind ? undefined : previous
-                  )
-                }
-                onAction={save}
-              />
+            )}
+            <div className="actions-column">
+              <ToastRegion toast={toast} notifications={notifications} />
+              {account.data && active && (
+                <NextActions
+                  key={active.Id}
+                  snapshot={account.data}
+                  selected={active}
+                  pending={pending}
+                  blocked={blocked}
+                  validation={validation}
+                  onInputChange={(kind) =>
+                    setValidation((previous) =>
+                      previous?.kind === kind ? undefined : previous
+                    )
+                  }
+                  onAction={save}
+                />
+              )}
             </div>
-          )}
+          </div>
         </section>
       </div>
-      <ToastRegion toast={toast} notifications={notifications} />
     </>
   );
 }

@@ -323,9 +323,7 @@ export function Pipeline({
             {inputFilter("minimum", "Min amount", "number")}
             {inputFilter("maximum", "Max amount", "number")}
           </div>
-        ) : (
-          <p>Amount filters are unavailable with your Salesforce access.</p>
-        )}
+        ) : null}
         {selectFilter("health", "Health", [
           "Green",
           "Amber",
@@ -337,7 +335,14 @@ export function Pipeline({
           "Health reason",
           Object.keys(healthReasonLabels)
         )}
-        <small className="filter-help">Filters apply as you change them.</small>
+        <div className="filter-help">
+          <small>Filters apply as you change them.</small>
+          {!data.amountAvailable && (
+            <small className="filter-permission">
+              Amount filters are unavailable with your Salesforce access.
+            </small>
+          )}
+        </div>
       </fieldset>
       {(dimensions.length > 0 || filters.search) && (
         <div
